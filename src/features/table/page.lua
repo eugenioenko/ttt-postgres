@@ -21,7 +21,6 @@ local function data_tab(p, rel)
     return
   end
   UI.grid.render(p, grid, { title = rel.key, empty = "No rows in " .. rel.name })
-  UI.status(p, "Enter shows the whole row.")
 end
 
 local function refresh(page, rel)

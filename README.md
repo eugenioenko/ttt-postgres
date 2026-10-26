@@ -61,7 +61,7 @@ The sidebar shows a schema switcher, a filter, and the tables and views of the s
 
 In a **query tab**, type SQL and press **F5** or **Run**. While it runs, the status line counts the rows received and a **Cancel** button stops it. Cancelling, or closing the tab, stops psql and asks the server to cancel the statement too. Running again while a query runs cancels the first run. The tab shows the result of the last statement that returns rows, with the row count, command tags such as `UPDATE 3`, and the server time. Errors show psql's message with the caret under the failing position.
 
-**View** at the end of a row, Enter or a double click shows every column of that row in full. Escape closes it.
+**View** at the end of a row or Enter shows every column of that row in full. Escape closes it.
 
 ### Commands
 
