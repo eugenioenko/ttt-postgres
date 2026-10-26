@@ -1,0 +1,16 @@
+{
+  "name": "postgres",
+  "displayName": "PostgreSQL",
+  "description": "Browse PostgreSQL schemas, tables and views, page through rows, inspect structure and run queries through psql",
+  "version": "0.1.0",
+  "author": "eugenioenko",
+  "entry": "init.lua",
+  "api": 1,
+  "permissions": {
+    "panel.sidebar": true,
+    "panel.editor": true,
+    "commands": true,
+    "storage": true,
+    "system.exec": ["psql"]
+  }
+}
