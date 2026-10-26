@@ -15,6 +15,8 @@ local MAX_WIDTH = 60
 local MAX_DIALOG_ROWS = 30
 local DIALOG_WIDTH = 96
 
+local ACTIONS = { label = "", actions = { { label = "View", command = "view" } } }
+
 function M.new(spec)
   local grid = {
     columns = {},
@@ -135,6 +137,12 @@ local function show_row(grid, title, i)
   Dialog.open_dialog(heading, DIALOG_WIDTH, rows + 2, U.bind(row_dialog, entries, rows))
 end
 
+local function row_command(grid, title, cmd, i)
+  if cmd == "view" then
+    show_row(grid, title, i)
+  end
+end
+
 local function change_page(grid, offset)
   grid.offset = offset
   grid.sel = 1
@@ -198,6 +206,9 @@ function M.render(p, grid, opts)
     columns[i] = { label = name }
   end
   columns, rows = M.fit(columns, rows)
+  if #columns > 0 then
+    columns[#columns + 1] = ACTIONS
+  end
   p:table({
     inset = 1,
     columns = columns,
@@ -208,6 +219,7 @@ function M.render(p, grid, opts)
     empty = grid.err and "Couldn't load rows" or (opts.empty or "No rows"),
     on_select = U.bind(select_row, grid),
     on_activate = U.bind(show_row, grid, opts.title or "Row"),
+    on_command = U.bind(row_command, grid, opts.title or "Row"),
   })
   p:divider()
   p:hstack({ height = 1, align = "center", render = U.bind(pager, grid) })
