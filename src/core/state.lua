@@ -1,18 +1,15 @@
 local storage = require("ttt.storage")
+local Saved = require("core.saved")
 
 local S = {}
 
-local saved = storage.get("connection")
-S.saved = saved ~= nil
-saved = saved or {}
-S.conn = {
-  uri = saved.uri or "",
-  host = saved.host or "localhost",
-  port = saved.port or "5432",
-  database = saved.database or "postgres",
-  user = saved.user or "postgres",
-  password = saved.password or "",
-}
+local function default_conn()
+  return { uri = "", host = "localhost", port = "5432", database = "postgres", user = "postgres", password = "" }
+end
+
+S.default_conn = default_conn
+S.entry = Saved.load()
+S.conn = S.entry and Saved.conn(S.entry) or default_conn()
 S.settings = storage.get("settings") or {}
 S.psql_path = S.settings.psql_path or "psql"
 S.page_size = tonumber(S.settings.page_size) or 50
@@ -41,7 +38,7 @@ function S.redraw()
 end
 
 function S.configured()
-  return S.saved
+  return Saved.ready(S.entry)
 end
 
 return S

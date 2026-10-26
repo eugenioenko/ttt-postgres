@@ -2,7 +2,9 @@ local U = require("core.util")
 local S = require("core.state")
 local Db = require("core.db")
 local UI = require("components")
+local Saved = require("core.saved")
 local Connection = require("app.connection")
+local Connections = require("app.connections")
 
 local M = {}
 
@@ -17,6 +19,11 @@ local function status_item()
     return { id = "conn", icon = "◌", label = "Connecting to " .. label .. "…", muted = true }
   elseif S.status == "error" then
     return { id = "conn", icon = "✕", label = label .. " · not connected", muted = true }
+  end
+  if S.entry then
+    return { id = "conn", icon = "○", label = S.entry.name .. " · not connected", muted = true }
+  elseif #Saved.list > 0 then
+    return { id = "conn", icon = "○", label = "Choose a connection…", muted = true }
   end
   return { id = "conn", icon = "○", label = "Set up connection…", muted = true }
 end
@@ -91,7 +98,11 @@ local function on_link_command(command, node)
     return
   end
   if node.id == "conn" then
-    Connection.dialog()
+    if #Saved.list > 0 then
+      Connections.dialog()
+    else
+      Connection.new()
+    end
   elseif node.id == "query" and M.new_query then
     M.new_query()
   end

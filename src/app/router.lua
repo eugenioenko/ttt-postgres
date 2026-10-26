@@ -43,8 +43,9 @@ local function forget(tab)
   end
 end
 
--- Opens a page in its own tab, keyed by what it shows, or focuses that tab
--- when it is already open; ttt ignores the rest of the config then.
+-- Opens a page in its own tab, keyed by what it shows, or switches to that tab
+-- when it is already open; ttt ignores the rest of the config then. Focus
+-- moves into the tab only when `focus` is set.
 function M.show(key, make_page, focus)
   local tab = M.tabs[key]
   if not tab then
@@ -57,13 +58,9 @@ function M.show(key, make_page, focus)
     render = U.bind(render, tab),
     on_event = U.bind(on_event, tab),
     on_close = U.bind(forget, tab),
+    focus = focus == true,
   }
   ttt.open_tab(config)
-  -- Opening an id that is open is the only way to focus a tab, and a click in
-  -- the sidebar takes focus back after its callback, so it waits a tick.
-  if focus then
-    ttt.set_timeout(1, U.bind(ttt.open_tab, config))
-  end
   return tab
 end
 

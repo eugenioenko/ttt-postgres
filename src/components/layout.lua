@@ -1,3 +1,4 @@
+local text = require("ttt.text")
 local U = require("core.util")
 
 local M = {}
@@ -35,28 +36,18 @@ local function error_lines(lines, b)
   end
 end
 
-local function wrap(out, line, width)
-  while #line > width do
-    local cut = line:sub(1, width):find(" [^ ]*$")
-    if not cut or cut < width / 2 then
-      cut = width
-    end
-    out[#out + 1] = line:sub(1, cut)
-    line = line:sub(cut + 1)
-  end
-  out[#out + 1] = line
-end
-
 -- One label per line, so psql's caret under the error position lines up.
-function M.error_box(p, title, text)
+function M.error_box(p, title, message)
   local width = 0
   if p.size then
     width = p:size() - 6
   end
   local lines = {}
-  for _, line in ipairs(U.split(U.trim(text), "\n")) do
+  for _, line in ipairs(U.split(U.trim(message), "\n")) do
     if width > 20 then
-      wrap(lines, line, width)
+      for _, part in ipairs(text.wrap(line, width)) do
+        lines[#lines + 1] = part
+      end
     else
       lines[#lines + 1] = line
     end

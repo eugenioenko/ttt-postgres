@@ -3,6 +3,7 @@ local S = require("core.state")
 local Db = require("core.db")
 local Sidebar = require("app.sidebar")
 local Connection = require("app.connection")
+local Connections = require("app.connections")
 local Settings = require("app.settings")
 local Table = require("features.table")
 local Query = require("features.query")
@@ -17,6 +18,8 @@ local function settings_changed()
 end
 
 Settings.on_change = settings_changed
+Connection.pick = Connections.dialog
+Connection.on_connected = settings_changed
 
 local function new_query()
   Query.new()
@@ -29,10 +32,11 @@ local function refresh()
 end
 
 local sidebar_actions = {
-  connection = Connection.dialog,
+  connections = Connections.dialog,
+  new_connection = Connection.new,
   settings = Settings.dialog,
   query = new_query,
-  reconnect = Db.connect,
+  reconnect = Connection.reconnect,
   refresh = refresh,
 }
 
@@ -51,18 +55,20 @@ ttt.register({
       { label = "New Query", command = "query" },
       { label = "Refresh", command = "refresh" },
       { separator = true },
-      { label = "Connection…", command = "connection" },
+      { label = "Connections…", command = "connections" },
+      { label = "New Connection…", command = "new_connection" },
       { label = "Settings…", command = "settings" },
       { label = "Reconnect", command = "reconnect" },
     },
     on_action = on_action,
   },
   commands = {
-    { id = "postgres.connect", title = "Postgres: Connect…", handler = Connection.dialog },
+    { id = "postgres.connections", title = "Postgres: Connections…", handler = Connections.dialog },
+    { id = "postgres.connect", title = "Postgres: New Connection…", handler = Connection.new },
     { id = "postgres.newQuery", title = "Postgres: New Query", handler = new_query },
     { id = "postgres.runQuery", title = "Postgres: Run Query", handler = Query.run_active },
     { id = "postgres.refresh", title = "Postgres: Refresh", handler = refresh },
-    { id = "postgres.reconnect", title = "Postgres: Reconnect", handler = Db.connect },
+    { id = "postgres.reconnect", title = "Postgres: Reconnect", handler = Connection.reconnect },
     { id = "postgres.settings", title = "Postgres: Settings…", handler = Settings.dialog },
   },
 })

@@ -1,4 +1,5 @@
 local ttt = require("ttt")
+local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Psql = require("core.psql")
@@ -9,7 +10,7 @@ local Psql = require("core.psql")
 local M = {}
 
 local MAX_CELL = 200
-local MAX_WIDTH = 40
+local MAX_WIDTH = 60
 
 function M.new(spec)
   local grid = {
@@ -37,10 +38,7 @@ function M.cell(v)
     return "NULL"
   end
   v = v:gsub("\r?\n", " ↵ "):gsub("\t", " ")
-  if #v > MAX_CELL then
-    v = v:sub(1, MAX_CELL) .. "…"
-  end
-  return v
+  return text.truncate(v, MAX_CELL, "…")
 end
 
 function M.full(v)
@@ -110,30 +108,37 @@ local function pager(grid, h)
   h:pager({ offset = grid.offset, limit = S.page_size, total = grid.total, on_change = U.bind(change_page, grid) })
 end
 
-local function runes(s)
-  local _, n = s:gsub("[^\128-\191]", "")
-  return n
-end
-
--- Columns without a width fit their widest cell, within bounds; the last
--- one takes what is left.
+-- Columns without a width fit their widest cell, up to MAX_WIDTH, and longer
+-- cells end in an ellipsis. The last column keeps that width as its minimum
+-- and grows into the space left; columns that add up to more than the table
+-- scroll sideways. Returns the columns and the clipped rows.
 function M.fit(columns, rows)
   local out = {}
   for i, col in ipairs(columns) do
     local w = col.width
     if not w then
-      w = runes(col.label)
+      w = text.width(col.label)
       for _, cells in ipairs(rows) do
-        w = math.max(w, runes(cells[i] or ""))
+        w = math.max(w, text.width(cells[i] or ""))
       end
       w = math.min(math.max(w, 4), MAX_WIDTH)
     end
     out[i] = { label = col.label, width = w, align = col.align }
   end
-  if #out > 0 then
-    out[#out].width = columns[#columns].width
+  local last = out[#out]
+  local grows = last and not columns[#columns].width
+  local clipped = {}
+  for r, cells in ipairs(rows) do
+    local line = {}
+    for i, col in ipairs(out) do
+      line[i] = (grows and i == #out) and (cells[i] or "") or text.truncate(cells[i] or "", col.width, "…")
+    end
+    clipped[r] = line
   end
-  return out
+  if grows then
+    last.min_width, last.width = last.width, nil
+  end
+  return out, clipped
 end
 
 function M.render(p, grid, opts)
@@ -150,7 +155,7 @@ function M.render(p, grid, opts)
   for i, name in ipairs(grid.columns) do
     columns[i] = { label = name }
   end
-  columns = M.fit(columns, rows)
+  columns, rows = M.fit(columns, rows)
   p:table({
     inset = 1,
     columns = columns,

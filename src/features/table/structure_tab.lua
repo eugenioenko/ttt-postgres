@@ -28,7 +28,8 @@ local REF_COLUMNS = { { label = "Table" }, { label = "Name" }, { label = "Defini
 local CONSTRAINT_COLUMNS = { { label = "Name" }, { label = "Type", width = 10 }, { label = "Definition" } }
 
 local function section_table(columns, rows, empty, b)
-  b:table({ inset = 1, columns = UI.grid.fit(columns, rows), rows = rows, empty = empty })
+  local fitted, cells = UI.grid.fit(columns, rows)
+  b:table({ inset = 1, columns = fitted, rows = cells, empty = empty })
 end
 
 local function section(p, title, columns, rows, empty)

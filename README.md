@@ -8,7 +8,7 @@ The plugin talks to the server through `psql`, the PostgreSQL command line clien
 
 The **Postgres** sidebar panel has a schema switcher, a filter, and the tables and views of the current schema. Tables show their estimated row count (from the planner statistics, so it costs nothing), materialized views show `mat`. Activating a table or view opens it in its own editor tab, and opening it again focuses that tab.
 
-- **Data**: the rows, a page at a time. Paging runs `LIMIT`/`OFFSET` on the server, ordered by the primary key when there is one, and the total comes from `count(*)`. Enter on a row shows every column in full, NULLs and line breaks included.
+- **Data**: the rows, a page at a time. Paging runs `LIMIT`/`OFFSET` on the server, ordered by the primary key when there is one, and the total comes from `count(*)`. Columns are as wide as their widest value, up to 60 columns of text, and a table with more columns than fit scrolls sideways (Left and Right, or Shift+wheel). Enter on a row shows every column in full, NULLs and line breaks included.
 - **Structure**: kind, estimated rows, size and primary key; the columns with their type, nullability, default (identity and generated columns too) and PK/FK markers; indexes with their definition and size; foreign keys; the foreign keys of other tables that point here; unique, check and exclusion constraints. Views show their definition.
 - **Query**: a SQL editor in its own tab. **Run** or F5 runs everything in it. The result of the last statement that returns rows shows in a table, with the row count, the command tags (`UPDATE 3`, `ROLLBACK`) and the server time. Errors show psql's message as it prints it, with the caret under the failing position, and notices show below the editor.
 
@@ -16,11 +16,12 @@ Commands in the palette:
 
 | Command | What it does |
 |---------|--------------|
-| `Postgres: Connect…` | Set the connection |
+| `Postgres: Connections…` | Pick a saved connection to connect to, edit or delete |
+| `Postgres: New Connection…` | Add a connection and connect to it |
 | `Postgres: New Query` | Open a query tab |
 | `Postgres: Run Query` | Run the query tab you used last |
 | `Postgres: Refresh` | Reload the schema's tables and the open tabs |
-| `Postgres: Reconnect` | Connect again with the saved settings |
+| `Postgres: Reconnect` | Connect again to the current connection |
 | `Postgres: Settings…` | Set the psql binary and the page size |
 
 The panel's menu has the same entries, and each table tab has a **Query** button that opens a query on that table.
@@ -38,13 +39,19 @@ git clone https://github.com/eugenioenko/ttt-postgres.git
 ln -s "$PWD/ttt-postgres" ~/.config/ttt/plugins/postgres
 ```
 
-ttt asks you to approve the permissions on first start. The plugin uses `system.exec` for `psql`, `storage` (to remember the connection, the schema and the settings), `panel.sidebar`, `panel.editor` and `commands`.
+ttt asks you to approve the permissions on first start. The plugin uses `system.exec` for `psql`, `storage` (to remember the saved connections, the schema and the settings), `panel.sidebar`, `panel.editor` and `commands`.
 
 ## Connecting
 
-Open the **Postgres** sidebar panel and pick **Set up connection…**, or run `Postgres: Connect…`. Fill in the host, port, database, user and password, or paste a connection URI (`postgresql://user:password@host:5432/db?sslmode=require`), which replaces the fields. The plugin connects before it saves, so a typo shows up as psql's error in the dialog.
+Open the **Postgres** sidebar panel and pick **Set up connection…**, or run `Postgres: New Connection…`. Give the connection a name (it defaults to `database@host`), and fill in the host, port, database, user and password, or paste a connection URI (`postgresql://user@host:5432/db?sslmode=require`), which replaces the fields. The plugin connects before it saves, so a typo shows up as psql's error in the dialog.
 
-Leave the password empty to let libpq find it the usual way: the `PGPASSWORD` variable of the environment ttt was started from, or `~/.pgpass`. That is the safer choice. A password typed in the dialog is saved in plain text in ttt's plugin storage (`~/.config/ttt/state/plugins/postgres.json`) and goes to psql inside its connection string argument, which other users of the machine can see in the process list while a query runs. ttt's process API has no way to set a child's environment, so the plugin cannot pass it through `PGPASSWORD` itself.
+Connections are saved by name. `Postgres: Connections…`, the panel's menu, or a click on the connection at the bottom of the panel lists them: Enter or **Connect** connects to the selected one, **Edit** opens it in the dialog, **Delete** removes it after you confirm, and **New…** adds another. When ttt starts, the plugin connects to the one you used last, unless it has to ask for its password. A connection saved by an earlier version of the plugin becomes the first saved connection, password included.
+
+The password is not saved unless you tick **Save password**. Without it, the password is kept in memory until ttt exits, and connecting to that connection in a later session opens the dialog with the other fields filled in and asks for it. With it, the password is stored in plain text in ttt's plugin storage (`~/.config/ttt/state/plugins/postgres.json`), so only save it for local, non-sensitive credentials; the dialog says so while the box is ticked. A password in a connection URI is treated the same way: it is taken out of the URI before the URI is saved.
+
+Leave the password empty to let libpq find it the usual way: the `PGPASSWORD` variable of the environment ttt was started from, or `~/.pgpass`. A connection that saves an empty password connects without asking.
+
+psql gets the password through the `PGPASSWORD` variable of its own environment, never on its command line, so other users of the machine cannot see it in the process list.
 
 The SQL never goes on the command line: psql reads it from standard input.
 

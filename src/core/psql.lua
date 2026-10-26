@@ -1,6 +1,7 @@
 local sys = require("ttt.system")
 local U = require("core.util")
 local S = require("core.state")
+local Saved = require("core.saved")
 
 -- psql runs unaligned with the ASCII unit and record separators between
 -- fields and rows, and a control character for NULL, so values with commas,
@@ -25,26 +26,25 @@ local function add(parts, key, value)
   end
 end
 
--- Every value is quoted, so no argument holds "=!", which ttt refuses.
-function M.conninfo(conn)
-  local uri = U.trim(conn.uri)
+-- The password never goes into the connection string: psql gets it through
+-- PGPASSWORD, which other users cannot read in the process list.
+function M.target(conn)
+  local uri, uri_password = Saved.split_uri(conn.uri)
+  local password = (conn.password or "") ~= "" and conn.password or uri_password or ""
   if uri ~= "" then
-    return uri
+    return uri, password
   end
   local parts = {}
   add(parts, "host", conn.host)
   add(parts, "port", conn.port)
   add(parts, "dbname", conn.database)
   add(parts, "user", conn.user)
-  if conn.password and conn.password ~= "" then
-    parts[#parts + 1] = "password=" .. quote(conn.password)
-  end
   add(parts, "connect_timeout", "10")
   add(parts, "application_name", "ttt-postgres")
-  return table.concat(parts, " ")
+  return table.concat(parts, " "), password
 end
 
-function M.args(conn)
+function M.args(conninfo)
   return {
     "-X",
     "-q",
@@ -61,7 +61,7 @@ function M.args(conn)
     "-P",
     "null=" .. M.NULL,
     "-d",
-    M.conninfo(conn),
+    conninfo,
   }
 end
 
@@ -162,7 +162,12 @@ function M.run(script, cb)
   if not sys.exec_async then
     return cb({ err = "The plugin needs the system.exec permission for psql.", statements = {} })
   end
-  local _, err = sys.exec_async(S.psql_path, M.args(S.conn), { stdin = script }, U.bind(finished, cb))
+  local conninfo, password = M.target(S.conn)
+  local opts = { stdin = script }
+  if password ~= "" then
+    opts.env = { PGPASSWORD = password }
+  end
+  local _, err = sys.exec_async(S.psql_path, M.args(conninfo), opts, U.bind(finished, cb))
   if err then
     local msg = tostring(err)
     if msg:find("permission denied", 1, true) then

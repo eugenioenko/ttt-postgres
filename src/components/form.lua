@@ -1,11 +1,13 @@
+local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Layout = require("components.layout")
 local Inputs = require("components.inputs")
 
--- Forms from a field spec: { key, label, kind = "enum"|"multiline"|"readonly",
--- options, value, placeholder, password, required, rows, show(vals) }, plus
--- the form's submit, busy_text and hint.
+-- Forms from a field spec: { key, label, kind = "enum"|"multiline"|"readonly"|
+-- "checkbox"|"note", options, value, placeholder, password, required, rows,
+-- show(vals), note(vals) -> text, style }, plus the form's submit, busy_text,
+-- hint and focus (the key of the field to focus first).
 local M = {}
 
 function M.field_options(f)
@@ -55,7 +57,12 @@ function M.new_form(spec)
         v = options[1].value
       end
     end
-    form.vals[f.key] = v or ""
+    if f.kind == "checkbox" then
+      v = v == true
+    elseif v == nil then
+      v = ""
+    end
+    form.vals[f.key] = v
   end
   form.submit = U.bind(submit, form)
   return form
@@ -67,6 +74,10 @@ function M.form_height(form)
     if shown(form, f) then
       if f.kind == "multiline" then
         h = h + (f.rows or 6) + 2
+      elseif f.kind == "checkbox" then
+        h = h + 1
+      elseif f.kind == "note" then
+        h = h + (f.rows or 1)
       else
         h = h + 3
       end
@@ -88,8 +99,26 @@ local function enum_field(form, f, b)
   Inputs.dropdown(b, M.field_options(f), form.vals[f.key], U.bind(pick_value, form, f.key))
 end
 
+local function note_field(p, form, f)
+  local rows = f.rows or 1
+  local note, style = f.note(form.vals)
+  local width = math.max(p:size() - 2, 10)
+  local lines = text.wrap(note or "", width)
+  for i = 1, rows do
+    local line = lines[i] or ""
+    if i == rows and lines[i + 1] then
+      line = text.truncate(line .. " " .. lines[i + 1], width, "…")
+    end
+    p:label({ text = line, style = style or "muted", padding_left = 1 })
+  end
+end
+
 local function render_field(p, form, f, first)
-  if f.kind == "enum" then
+  if f.kind == "checkbox" then
+    p:checkbox({ label = f.label, checked = form.vals[f.key] == true, on_change = U.bind(pick_value, form, f.key) })
+  elseif f.kind == "note" then
+    note_field(p, form, f)
+  elseif f.kind == "enum" then
     Layout.frame(p, f.label, U.bind(enum_field, form, f))
   elseif f.kind == "readonly" then
     p:label({ text = f.label .. ": " .. tostring(form.vals[f.key]), style = "muted", border = true })
@@ -119,18 +148,19 @@ end
 function M.render_form(p, form, on_cancel)
   for i, f in ipairs(form.spec.fields) do
     if shown(form, f) then
-      render_field(p, form, f, i == 1)
+      local focus = form.spec.focus
+      render_field(p, form, f, focus and f.key == focus or (not focus and i == 1))
     end
   end
-  local text, style = "", "muted"
+  local msg, style = "", "muted"
   if form.err then
-    text, style = "✕ " .. form.err, "danger"
+    msg, style = "✕ " .. form.err, "danger"
   elseif form.busy then
-    text = form.spec.busy_text or "Saving…"
+    msg = form.spec.busy_text or "Saving…"
   elseif form.spec.hint then
-    text = form.spec.hint
+    msg = form.spec.hint
   end
-  p:label({ text = text, style = style, padding_left = 1 })
+  p:label({ text = msg, style = style, padding_left = 1 })
   p:hstack({ height = 1, gap = 1, align = "right", render = U.bind(buttons, form, on_cancel) })
 end
 

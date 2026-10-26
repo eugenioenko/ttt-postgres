@@ -26,70 +26,171 @@ end
 -- src/app/connection.lua ----------------------------------------------------
 __modules["app.connection"] = function()
 local ttt = require("ttt")
-local storage = require("ttt.storage")
 local U = require("core.util")
 local S = require("core.state")
+local Saved = require("core.saved")
 local Db = require("core.db")
 local UI = require("components")
 
 local M = {}
 
-local FIELDS = { "uri", "host", "port", "database", "user", "password" }
+M.pick = nil
+M.on_connected = nil
+
+local PLAIN_TEXT = "⚠ The password is stored in plain text in ttt's plugin storage."
+  .. " Only save it for local, non-sensitive credentials."
+local SESSION_ONLY = "The password is used until ttt exits and is not saved."
+
+local function password_note(vals)
+  if vals.save_password then
+    return PLAIN_TEXT, "warning"
+  end
+  return SESSION_ONLY, "muted"
+end
+
+local function after_connect()
+  ttt.notify("Connected to " .. Db.label())
+  if M.on_connected then
+    M.on_connected()
+  end
+end
 
 -- A failed attempt stays in memory for Retry but is not saved.
-local function connected(done, err)
+local function connected(entry, old_name, password, done, err)
   if err then
     return done(err)
   end
-  storage.set("connection", S.conn)
-  S.saved = true
-  ttt.notify("Connected to " .. Db.label())
+  Saved.put(entry, old_name)
+  Saved.session[entry.name] = not entry.save_password and password or nil
+  Saved.set_active(entry.name)
+  S.entry = entry
+  after_connect()
   done()
 end
 
-local function connect(v, done)
-  local conn = {}
-  for _, key in ipairs(FIELDS) do
-    conn[key] = key == "password" and (v[key] or "") or U.trim(v[key])
+local function connect(old_name, v, done)
+  local entry = { save_password = v.save_password == true }
+  for _, key in ipairs(Saved.FIELDS) do
+    entry[key] = U.trim(v[key])
   end
-  S.conn = conn
+  local uri, uri_password = Saved.split_uri(entry.uri)
+  entry.uri = uri
+  local password = v.password ~= "" and v.password or uri_password or ""
+  entry.password = entry.save_password and password or nil
+  entry.name = U.trim(v.name)
+  if entry.name == "" then
+    entry.name = Saved.default_name(entry, old_name)
+  end
+  local taken = Saved.find(entry.name)
+  if taken and entry.name ~= old_name then
+    return done("A saved connection is already called " .. entry.name)
+  end
+  S.conn = Saved.conn(entry)
+  S.conn.password = password
   S.server = nil
-  Db.connect(U.bind(connected, done))
+  Db.connect(U.bind(connected, entry, old_name, password, done))
 end
 
-function M.dialog()
+local function form(title, entry, focus)
+  local conn = entry and Saved.conn(entry) or S.default_conn()
   UI.dialog({
-    title = "PostgreSQL Connection",
+    title = title,
     submit = "Connect",
     busy_text = "Connecting…",
-    hint = "A connection URI replaces the fields below it.",
-    width = 72,
+    hint = "A connection URI replaces the host, port, database and user.",
+    width = 76,
+    focus = focus,
     fields = {
+      {
+        key = "name",
+        label = "Name",
+        value = entry and entry.name or "",
+        placeholder = "database@host when empty",
+      },
       {
         key = "uri",
         label = "Connection URI (optional)",
-        value = S.conn.uri,
+        value = conn.uri,
         placeholder = "postgresql://user@localhost:5432/postgres",
       },
-      { key = "host", label = "Host", value = S.conn.host, placeholder = "localhost" },
-      { key = "port", label = "Port", value = S.conn.port, placeholder = "5432" },
-      { key = "database", label = "Database", value = S.conn.database, placeholder = "postgres" },
-      { key = "user", label = "User", value = S.conn.user, placeholder = "postgres" },
+      { key = "host", label = "Host", value = conn.host, placeholder = "localhost" },
+      { key = "port", label = "Port", value = conn.port, placeholder = "5432" },
+      { key = "database", label = "Database", value = conn.database, placeholder = "postgres" },
+      { key = "user", label = "User", value = conn.user, placeholder = "postgres" },
       {
         key = "password",
         label = "Password (empty uses PGPASSWORD or ~/.pgpass)",
-        value = S.conn.password,
+        value = conn.password,
         password = true,
       },
+      { key = "save_password", kind = "checkbox", label = "Save password", value = entry and entry.save_password },
+      { key = "password_note", kind = "note", rows = 2, note = password_note },
     },
-    on_submit = connect,
+    on_submit = U.bind(connect, entry and entry.name),
   })
 end
 
+function M.new()
+  form("New PostgreSQL Connection")
+end
+
+function M.edit(name)
+  local entry = Saved.find(name)
+  if entry then
+    form("Edit " .. name, entry)
+  end
+end
+
+local function used(err)
+  if not err then
+    after_connect()
+  end
+end
+
+-- Connects to a saved connection, or asks for its password first when it
+-- has none for this session.
+function M.use(name)
+  local entry = Saved.find(name)
+  if not entry then
+    return
+  end
+  if not Saved.ready(entry) then
+    form("Connect to " .. name, entry, "password")
+    return
+  end
+  S.entry = entry
+  S.conn = Saved.conn(entry)
+  S.server = nil
+  Saved.set_active(name)
+  Db.connect(used)
+end
+
+function M.reconnect()
+  if S.status == "idle" and not S.configured() then
+    if S.entry then
+      return M.use(S.entry.name)
+    end
+    return M.new()
+  end
+  Db.connect()
+end
+
+local function pick()
+  if M.pick then
+    M.pick()
+  end
+end
+
 local function buttons(h)
-  h:button({ label = "Connection…", on_click = M.dialog })
-  if (S.configured() or S.status == "error") and S.status ~= "connecting" then
+  if #Saved.list > 0 then
+    h:button({ label = "Connections…", on_click = pick })
+  else
+    h:button({ label = "New Connection…", on_click = M.new })
+  end
+  if S.status == "error" then
     h:button({ label = "Retry", on_click = Db.connect })
+  elseif S.status == "idle" and S.entry then
+    h:button({ label = "Connect", on_click = M.reconnect })
   end
 end
 
@@ -98,8 +199,10 @@ function M.not_connected(p)
   local text = "Not connected."
   if S.status == "connecting" then
     text = "Connecting to " .. Db.label() .. "…"
-  elseif not S.configured() then
-    text = "Not configured. Set up the connection first."
+  elseif S.entry and not S.configured() then
+    text = "Not connected. " .. S.entry.name .. " asks for its password on connect."
+  elseif not S.entry then
+    text = #Saved.list > 0 and "Not connected. Choose a saved connection." or "No saved connection. Set one up first."
   end
   if S.status == "error" then
     UI.error_box(p, "Couldn't connect to " .. Db.label(), S.message)
@@ -107,6 +210,167 @@ function M.not_connected(p)
     p:label({ text = text, style = "muted", margin_top = 1, padding_left = 1 })
   end
   p:hstack({ height = 1, gap = 1, margin_top = 1, padding_left = 1, render = buttons })
+end
+
+return M
+end
+
+-- src/app/connections.lua ---------------------------------------------------
+__modules["app.connections"] = function()
+local ttt = require("ttt")
+local text = require("ttt.text")
+local S = require("core.state")
+local Saved = require("core.saved")
+local UI = require("components")
+local Connection = require("app.connection")
+
+local M = {}
+
+local COLUMNS =
+  { { label = "", width = 1 }, { label = "Name" }, { label = "Password", width = 15 }, { label = "Server" } }
+local MAX_ROWS = 12
+
+local view = { sel = 1, deleting = nil }
+
+local function server(e)
+  if e.uri ~= "" then
+    return e.uri
+  end
+  return e.user .. "@" .. e.host .. ":" .. e.port .. "/" .. e.database
+end
+
+local function password_state(e)
+  if e.save_password then
+    return (e.password or "") ~= "" and "saved" or "none"
+  end
+  return Saved.session[e.name] and "this session" or "asks on connect"
+end
+
+local function rows()
+  local out = {}
+  for i, e in ipairs(Saved.list) do
+    local current = S.entry and S.entry.name == e.name and S.status == "ok"
+    out[i] = { current and "●" or "", e.name, password_state(e), server(e) }
+  end
+  return out
+end
+
+local function selected()
+  local e = Saved.list[view.sel]
+  return e and e.name
+end
+
+local function select_row(i)
+  view.sel = i
+  view.deleting = nil
+  S.redraw()
+end
+
+local function close_then(fn, name)
+  ttt.close_dialog()
+  fn(name)
+end
+
+local function connect_row(i)
+  view.sel = i
+  local name = selected()
+  if name then
+    close_then(Connection.use, name)
+  end
+end
+
+local function connect_selected()
+  connect_row(view.sel)
+end
+
+local function edit_selected()
+  local name = selected()
+  if name then
+    close_then(Connection.edit, name)
+  end
+end
+
+local function new_connection()
+  close_then(Connection.new)
+end
+
+local function ask_delete()
+  view.deleting = selected()
+  S.redraw()
+end
+
+local function cancel_delete()
+  view.deleting = nil
+  S.redraw()
+end
+
+local function confirm_delete()
+  local name = view.deleting
+  view.deleting = nil
+  Saved.remove(name)
+  if S.entry and S.entry.name == name then
+    S.entry = nil
+    Saved.set_active(nil)
+  end
+  view.sel = math.max(math.min(view.sel, #Saved.list), 1)
+  S.redraw()
+end
+
+local function buttons(h)
+  if view.deleting then
+    h:label({ text = "Delete " .. view.deleting .. "?", style = "warning" })
+    h:button({ label = "Cancel", style = "muted", on_click = cancel_delete })
+    h:button({ label = "Delete", style = "bracket", on_click = confirm_delete })
+    return
+  end
+  local none = #Saved.list == 0
+  h:button({ label = "Connect", disabled = none, on_click = connect_selected })
+  h:button({ label = "Edit", disabled = none, on_click = edit_selected })
+  h:button({ label = "Delete", disabled = none, on_click = ask_delete })
+  h:button({ label = "New…", on_click = new_connection })
+  h:button({ label = "Close", style = "muted", on_click = ttt.close_dialog })
+end
+
+-- The server column takes what the others leave and ends in an ellipsis,
+-- so the dialog never scrolls sideways.
+local function list(b)
+  local columns, cells = UI.grid.fit(COLUMNS, rows())
+  local room = b:size() - 2 - 2 * (#columns - 1)
+  for i = 1, #columns - 1 do
+    room = room - columns[i].width
+  end
+  columns[#columns].min_width = nil
+  for _, line in ipairs(cells) do
+    line[#columns] = text.truncate(line[#columns], math.max(room, 1), "…")
+  end
+  b:table({
+    inset = 1,
+    columns = columns,
+    rows = cells,
+    selected = view.sel,
+    empty = "No saved connections. New… adds one.",
+    on_select = select_row,
+    on_activate = connect_row,
+  })
+end
+
+local function render(p)
+  local n = math.min(math.max(#Saved.list, 1), MAX_ROWS)
+  p:box({ height = n + 2, margin_top = 1, render = list })
+  p:label({ text = "Enter connects to the selected connection.", style = "muted", margin_top = 1, padding_left = 1 })
+  p:hstack({ height = 1, gap = 1, margin_top = 1, padding_left = 1, render = buttons })
+end
+
+function M.dialog()
+  view.deleting = nil
+  for i, e in ipairs(Saved.list) do
+    if S.entry and e.name == S.entry.name then
+      view.sel = i
+    end
+  end
+  view.sel = math.max(math.min(view.sel, #Saved.list), 1)
+  local n = math.min(math.max(#Saved.list, 1), MAX_ROWS)
+  UI.open_dialog("PostgreSQL Connections", 96, n + 7, render)
 end
 
 return M
@@ -159,8 +423,9 @@ local function forget(tab)
   end
 end
 
--- Opens a page in its own tab, keyed by what it shows, or focuses that tab
--- when it is already open; ttt ignores the rest of the config then.
+-- Opens a page in its own tab, keyed by what it shows, or switches to that tab
+-- when it is already open; ttt ignores the rest of the config then. Focus
+-- moves into the tab only when `focus` is set.
 function M.show(key, make_page, focus)
   local tab = M.tabs[key]
   if not tab then
@@ -173,13 +438,9 @@ function M.show(key, make_page, focus)
     render = U.bind(render, tab),
     on_event = U.bind(on_event, tab),
     on_close = U.bind(forget, tab),
+    focus = focus == true,
   }
   ttt.open_tab(config)
-  -- Opening an id that is open is the only way to focus a tab, and a click in
-  -- the sidebar takes focus back after its callback, so it waits a tick.
-  if focus then
-    ttt.set_timeout(1, U.bind(ttt.open_tab, config))
-  end
   return tab
 end
 
@@ -260,7 +521,9 @@ local U = require("core.util")
 local S = require("core.state")
 local Db = require("core.db")
 local UI = require("components")
+local Saved = require("core.saved")
 local Connection = require("app.connection")
+local Connections = require("app.connections")
 
 local M = {}
 
@@ -275,6 +538,11 @@ local function status_item()
     return { id = "conn", icon = "◌", label = "Connecting to " .. label .. "…", muted = true }
   elseif S.status == "error" then
     return { id = "conn", icon = "✕", label = label .. " · not connected", muted = true }
+  end
+  if S.entry then
+    return { id = "conn", icon = "○", label = S.entry.name .. " · not connected", muted = true }
+  elseif #Saved.list > 0 then
+    return { id = "conn", icon = "○", label = "Choose a connection…", muted = true }
   end
   return { id = "conn", icon = "○", label = "Set up connection…", muted = true }
 end
@@ -349,7 +617,11 @@ local function on_link_command(command, node)
     return
   end
   if node.id == "conn" then
-    Connection.dialog()
+    if #Saved.list > 0 then
+      Connections.dialog()
+    else
+      Connection.new()
+    end
   elseif node.id == "query" and M.new_query then
     M.new_query()
   end
@@ -471,14 +743,16 @@ end
 
 -- src/components/form.lua ---------------------------------------------------
 __modules["components.form"] = function()
+local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Layout = require("components.layout")
 local Inputs = require("components.inputs")
 
--- Forms from a field spec: { key, label, kind = "enum"|"multiline"|"readonly",
--- options, value, placeholder, password, required, rows, show(vals) }, plus
--- the form's submit, busy_text and hint.
+-- Forms from a field spec: { key, label, kind = "enum"|"multiline"|"readonly"|
+-- "checkbox"|"note", options, value, placeholder, password, required, rows,
+-- show(vals), note(vals) -> text, style }, plus the form's submit, busy_text,
+-- hint and focus (the key of the field to focus first).
 local M = {}
 
 function M.field_options(f)
@@ -528,7 +802,12 @@ function M.new_form(spec)
         v = options[1].value
       end
     end
-    form.vals[f.key] = v or ""
+    if f.kind == "checkbox" then
+      v = v == true
+    elseif v == nil then
+      v = ""
+    end
+    form.vals[f.key] = v
   end
   form.submit = U.bind(submit, form)
   return form
@@ -540,6 +819,10 @@ function M.form_height(form)
     if shown(form, f) then
       if f.kind == "multiline" then
         h = h + (f.rows or 6) + 2
+      elseif f.kind == "checkbox" then
+        h = h + 1
+      elseif f.kind == "note" then
+        h = h + (f.rows or 1)
       else
         h = h + 3
       end
@@ -561,8 +844,26 @@ local function enum_field(form, f, b)
   Inputs.dropdown(b, M.field_options(f), form.vals[f.key], U.bind(pick_value, form, f.key))
 end
 
+local function note_field(p, form, f)
+  local rows = f.rows or 1
+  local note, style = f.note(form.vals)
+  local width = math.max(p:size() - 2, 10)
+  local lines = text.wrap(note or "", width)
+  for i = 1, rows do
+    local line = lines[i] or ""
+    if i == rows and lines[i + 1] then
+      line = text.truncate(line .. " " .. lines[i + 1], width, "…")
+    end
+    p:label({ text = line, style = style or "muted", padding_left = 1 })
+  end
+end
+
 local function render_field(p, form, f, first)
-  if f.kind == "enum" then
+  if f.kind == "checkbox" then
+    p:checkbox({ label = f.label, checked = form.vals[f.key] == true, on_change = U.bind(pick_value, form, f.key) })
+  elseif f.kind == "note" then
+    note_field(p, form, f)
+  elseif f.kind == "enum" then
     Layout.frame(p, f.label, U.bind(enum_field, form, f))
   elseif f.kind == "readonly" then
     p:label({ text = f.label .. ": " .. tostring(form.vals[f.key]), style = "muted", border = true })
@@ -592,18 +893,19 @@ end
 function M.render_form(p, form, on_cancel)
   for i, f in ipairs(form.spec.fields) do
     if shown(form, f) then
-      render_field(p, form, f, i == 1)
+      local focus = form.spec.focus
+      render_field(p, form, f, focus and f.key == focus or (not focus and i == 1))
     end
   end
-  local text, style = "", "muted"
+  local msg, style = "", "muted"
   if form.err then
-    text, style = "✕ " .. form.err, "danger"
+    msg, style = "✕ " .. form.err, "danger"
   elseif form.busy then
-    text = form.spec.busy_text or "Saving…"
+    msg = form.spec.busy_text or "Saving…"
   elseif form.spec.hint then
-    text = form.spec.hint
+    msg = form.spec.hint
   end
-  p:label({ text = text, style = style, padding_left = 1 })
+  p:label({ text = msg, style = style, padding_left = 1 })
   p:hstack({ height = 1, gap = 1, align = "right", render = U.bind(buttons, form, on_cancel) })
 end
 
@@ -613,6 +915,7 @@ end
 -- src/components/grid.lua ---------------------------------------------------
 __modules["components.grid"] = function()
 local ttt = require("ttt")
+local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Psql = require("core.psql")
@@ -623,7 +926,7 @@ local Psql = require("core.psql")
 local M = {}
 
 local MAX_CELL = 200
-local MAX_WIDTH = 40
+local MAX_WIDTH = 60
 
 function M.new(spec)
   local grid = {
@@ -651,10 +954,7 @@ function M.cell(v)
     return "NULL"
   end
   v = v:gsub("\r?\n", " ↵ "):gsub("\t", " ")
-  if #v > MAX_CELL then
-    v = v:sub(1, MAX_CELL) .. "…"
-  end
-  return v
+  return text.truncate(v, MAX_CELL, "…")
 end
 
 function M.full(v)
@@ -724,30 +1024,37 @@ local function pager(grid, h)
   h:pager({ offset = grid.offset, limit = S.page_size, total = grid.total, on_change = U.bind(change_page, grid) })
 end
 
-local function runes(s)
-  local _, n = s:gsub("[^\128-\191]", "")
-  return n
-end
-
--- Columns without a width fit their widest cell, within bounds; the last
--- one takes what is left.
+-- Columns without a width fit their widest cell, up to MAX_WIDTH, and longer
+-- cells end in an ellipsis. The last column keeps that width as its minimum
+-- and grows into the space left; columns that add up to more than the table
+-- scroll sideways. Returns the columns and the clipped rows.
 function M.fit(columns, rows)
   local out = {}
   for i, col in ipairs(columns) do
     local w = col.width
     if not w then
-      w = runes(col.label)
+      w = text.width(col.label)
       for _, cells in ipairs(rows) do
-        w = math.max(w, runes(cells[i] or ""))
+        w = math.max(w, text.width(cells[i] or ""))
       end
       w = math.min(math.max(w, 4), MAX_WIDTH)
     end
     out[i] = { label = col.label, width = w, align = col.align }
   end
-  if #out > 0 then
-    out[#out].width = columns[#columns].width
+  local last = out[#out]
+  local grows = last and not columns[#columns].width
+  local clipped = {}
+  for r, cells in ipairs(rows) do
+    local line = {}
+    for i, col in ipairs(out) do
+      line[i] = (grows and i == #out) and (cells[i] or "") or text.truncate(cells[i] or "", col.width, "…")
+    end
+    clipped[r] = line
   end
-  return out
+  if grows then
+    last.min_width, last.width = last.width, nil
+  end
+  return out, clipped
 end
 
 function M.render(p, grid, opts)
@@ -764,7 +1071,7 @@ function M.render(p, grid, opts)
   for i, name in ipairs(grid.columns) do
     columns[i] = { label = name }
   end
-  columns = M.fit(columns, rows)
+  columns, rows = M.fit(columns, rows)
   p:table({
     inset = 1,
     columns = columns,
@@ -832,6 +1139,7 @@ end
 
 -- src/components/layout.lua -------------------------------------------------
 __modules["components.layout"] = function()
+local text = require("ttt.text")
 local U = require("core.util")
 
 local M = {}
@@ -869,28 +1177,18 @@ local function error_lines(lines, b)
   end
 end
 
-local function wrap(out, line, width)
-  while #line > width do
-    local cut = line:sub(1, width):find(" [^ ]*$")
-    if not cut or cut < width / 2 then
-      cut = width
-    end
-    out[#out + 1] = line:sub(1, cut)
-    line = line:sub(cut + 1)
-  end
-  out[#out + 1] = line
-end
-
 -- One label per line, so psql's caret under the error position lines up.
-function M.error_box(p, title, text)
+function M.error_box(p, title, message)
   local width = 0
   if p.size then
     width = p:size() - 6
   end
   local lines = {}
-  for _, line in ipairs(U.split(U.trim(text), "\n")) do
+  for _, line in ipairs(U.split(U.trim(message), "\n")) do
     if width > 20 then
-      wrap(lines, line, width)
+      for _, part in ipairs(text.wrap(line, width)) do
+        lines[#lines + 1] = part
+      end
     else
       lines[#lines + 1] = line
     end
@@ -1036,6 +1334,7 @@ __modules["core.psql"] = function()
 local sys = require("ttt.system")
 local U = require("core.util")
 local S = require("core.state")
+local Saved = require("core.saved")
 
 -- psql runs unaligned with the ASCII unit and record separators between
 -- fields and rows, and a control character for NULL, so values with commas,
@@ -1060,26 +1359,25 @@ local function add(parts, key, value)
   end
 end
 
--- Every value is quoted, so no argument holds "=!", which ttt refuses.
-function M.conninfo(conn)
-  local uri = U.trim(conn.uri)
+-- The password never goes into the connection string: psql gets it through
+-- PGPASSWORD, which other users cannot read in the process list.
+function M.target(conn)
+  local uri, uri_password = Saved.split_uri(conn.uri)
+  local password = (conn.password or "") ~= "" and conn.password or uri_password or ""
   if uri ~= "" then
-    return uri
+    return uri, password
   end
   local parts = {}
   add(parts, "host", conn.host)
   add(parts, "port", conn.port)
   add(parts, "dbname", conn.database)
   add(parts, "user", conn.user)
-  if conn.password and conn.password ~= "" then
-    parts[#parts + 1] = "password=" .. quote(conn.password)
-  end
   add(parts, "connect_timeout", "10")
   add(parts, "application_name", "ttt-postgres")
-  return table.concat(parts, " ")
+  return table.concat(parts, " "), password
 end
 
-function M.args(conn)
+function M.args(conninfo)
   return {
     "-X",
     "-q",
@@ -1096,7 +1394,7 @@ function M.args(conn)
     "-P",
     "null=" .. M.NULL,
     "-d",
-    M.conninfo(conn),
+    conninfo,
   }
 end
 
@@ -1197,7 +1495,12 @@ function M.run(script, cb)
   if not sys.exec_async then
     return cb({ err = "The plugin needs the system.exec permission for psql.", statements = {} })
   end
-  local _, err = sys.exec_async(S.psql_path, M.args(S.conn), { stdin = script }, U.bind(finished, cb))
+  local conninfo, password = M.target(S.conn)
+  local opts = { stdin = script }
+  if password ~= "" then
+    opts.env = { PGPASSWORD = password }
+  end
+  local _, err = sys.exec_async(S.psql_path, M.args(conninfo), opts, U.bind(finished, cb))
   if err then
     local msg = tostring(err)
     if msg:find("permission denied", 1, true) then
@@ -1227,6 +1530,182 @@ end
 
 function M.is_null(v)
   return v == M.NULL
+end
+
+return M
+end
+
+-- src/core/saved.lua --------------------------------------------------------
+__modules["core.saved"] = function()
+local storage = require("ttt.storage")
+local U = require("core.util")
+
+-- Saved connections: { name, uri, host, port, database, user, save_password,
+-- password }. The password is stored only when save_password is set;
+-- otherwise it lives in M.session until ttt exits.
+local M = {}
+
+M.FIELDS = { "uri", "host", "port", "database", "user" }
+
+M.list = {}
+M.session = {}
+
+local function hex_char(h)
+  return string.char(tonumber(h, 16))
+end
+
+local function decode(s)
+  return (s:gsub("%%(%x%x)", hex_char))
+end
+
+local function split_keywords(conninfo)
+  local padded = " " .. conninfo
+  local before, password, after = padded:match("^(.-)%spassword%s*=%s*'([^']*)'(.*)$")
+  if not before then
+    before, password, after = padded:match("^(.-)%spassword%s*=%s*(%S+)(.*)$")
+  end
+  if not before then
+    return conninfo
+  end
+  return U.trim(before .. after), password
+end
+
+-- Moves a password out of a URI's user info or password parameter, or out of
+-- a key=value connection string, so it reaches psql through PGPASSWORD and is
+-- only saved when the user asks.
+function M.split_uri(uri)
+  uri = U.trim(uri)
+  if uri ~= "" and not uri:find("://", 1, true) then
+    return split_keywords(uri)
+  end
+  local password
+  local head, user, pw, rest = uri:match("^(%a[%w+.-]*://)([^:@/]*):([^@/]*)@(.*)$")
+  if head then
+    password = decode(pw)
+    uri = head .. user .. "@" .. rest
+  end
+  local base, query = uri:match("^([^?]*)%?(.*)$")
+  if base then
+    local kept = {}
+    for _, pair in ipairs(U.split(query, "&")) do
+      local v = pair:match("^password=(.*)$")
+      if v then
+        password = password or decode(v)
+      elseif pair ~= "" then
+        kept[#kept + 1] = pair
+      end
+    end
+    uri = #kept > 0 and base .. "?" .. table.concat(kept, "&") or base
+  end
+  return uri, password
+end
+
+function M.find(name)
+  for i, entry in ipairs(M.list) do
+    if entry.name == name then
+      return entry, i
+    end
+  end
+end
+
+function M.default_name(conn, except)
+  local host, db = U.trim(conn.host), U.trim(conn.database)
+  local uri = U.trim(conn.uri)
+  if uri ~= "" then
+    host = uri:match("://[^/?]*@([^/:?]+)") or uri:match("://([^/:?@]+)") or ""
+    db = uri:match("://[^/?]*/([^?]+)") or ""
+  end
+  local base = db ~= "" and db or "postgres"
+  if host ~= "" then
+    base = db ~= "" and db .. "@" .. host or host
+  end
+  local name, n = base, 1
+  while true do
+    local found = M.find(name)
+    if not found or found.name == except then
+      return name
+    end
+    n = n + 1
+    name = base .. " " .. n
+  end
+end
+
+function M.password(entry)
+  if entry.save_password then
+    return entry.password or ""
+  end
+  return M.session[entry.name]
+end
+
+-- Whether connecting needs no prompt for the password.
+function M.ready(entry)
+  return entry ~= nil and M.password(entry) ~= nil
+end
+
+function M.conn(entry)
+  local conn = { password = M.password(entry) or "" }
+  for _, key in ipairs(M.FIELDS) do
+    conn[key] = entry[key] or ""
+  end
+  return conn
+end
+
+local function save()
+  storage.set("connections", M.list)
+end
+
+function M.set_active(name)
+  storage.set("active", name)
+end
+
+-- Replaces the entry called `old_name`, or adds it.
+function M.put(entry, old_name)
+  local _, i = M.find(old_name or entry.name)
+  M.list[i or #M.list + 1] = entry
+  if old_name and old_name ~= entry.name then
+    M.session[old_name] = nil
+  end
+  save()
+end
+
+function M.remove(name)
+  local _, i = M.find(name)
+  if i then
+    table.remove(M.list, i)
+    M.session[name] = nil
+    save()
+  end
+end
+
+-- The single `connection` of earlier versions becomes the first saved
+-- connection, password included, so it keeps connecting without a prompt.
+local function migrate(old)
+  local entry = { save_password = true }
+  for _, key in ipairs(M.FIELDS) do
+    entry[key] = U.trim(old[key])
+  end
+  local uri, uri_password = M.split_uri(entry.uri)
+  entry.uri = uri
+  entry.password = (old.password and old.password ~= "") and old.password or uri_password or ""
+  entry.name = M.default_name(entry)
+  M.list = { entry }
+  save()
+  M.set_active(entry.name)
+  storage.remove("connection")
+end
+
+function M.load()
+  local list = storage.get("connections")
+  if type(list) == "table" then
+    M.list = list
+  else
+    local old = storage.get("connection")
+    if type(old) == "table" then
+      migrate(old)
+    end
+  end
+  local active = storage.get("active")
+  return M.find(active) or M.list[1]
 end
 
 return M
@@ -1323,20 +1802,17 @@ end
 -- src/core/state.lua --------------------------------------------------------
 __modules["core.state"] = function()
 local storage = require("ttt.storage")
+local Saved = require("core.saved")
 
 local S = {}
 
-local saved = storage.get("connection")
-S.saved = saved ~= nil
-saved = saved or {}
-S.conn = {
-  uri = saved.uri or "",
-  host = saved.host or "localhost",
-  port = saved.port or "5432",
-  database = saved.database or "postgres",
-  user = saved.user or "postgres",
-  password = saved.password or "",
-}
+local function default_conn()
+  return { uri = "", host = "localhost", port = "5432", database = "postgres", user = "postgres", password = "" }
+end
+
+S.default_conn = default_conn
+S.entry = Saved.load()
+S.conn = S.entry and Saved.conn(S.entry) or default_conn()
 S.settings = storage.get("settings") or {}
 S.psql_path = S.settings.psql_path or "psql"
 S.page_size = tonumber(S.settings.page_size) or 50
@@ -1365,7 +1841,7 @@ function S.redraw()
 end
 
 function S.configured()
-  return S.saved
+  return Saved.ready(S.entry)
 end
 
 return S
@@ -1910,7 +2386,8 @@ local REF_COLUMNS = { { label = "Table" }, { label = "Name" }, { label = "Defini
 local CONSTRAINT_COLUMNS = { { label = "Name" }, { label = "Type", width = 10 }, { label = "Definition" } }
 
 local function section_table(columns, rows, empty, b)
-  b:table({ inset = 1, columns = UI.grid.fit(columns, rows), rows = rows, empty = empty })
+  local fitted, cells = UI.grid.fit(columns, rows)
+  b:table({ inset = 1, columns = fitted, rows = cells, empty = empty })
 end
 
 local function section(p, title, columns, rows, empty)
@@ -2029,6 +2506,7 @@ local S = require("core.state")
 local Db = require("core.db")
 local Sidebar = require("app.sidebar")
 local Connection = require("app.connection")
+local Connections = require("app.connections")
 local Settings = require("app.settings")
 local Table = require("features.table")
 local Query = require("features.query")
@@ -2043,6 +2521,8 @@ local function settings_changed()
 end
 
 Settings.on_change = settings_changed
+Connection.pick = Connections.dialog
+Connection.on_connected = settings_changed
 
 local function new_query()
   Query.new()
@@ -2055,10 +2535,11 @@ local function refresh()
 end
 
 local sidebar_actions = {
-  connection = Connection.dialog,
+  connections = Connections.dialog,
+  new_connection = Connection.new,
   settings = Settings.dialog,
   query = new_query,
-  reconnect = Db.connect,
+  reconnect = Connection.reconnect,
   refresh = refresh,
 }
 
@@ -2077,18 +2558,20 @@ ttt.register({
       { label = "New Query", command = "query" },
       { label = "Refresh", command = "refresh" },
       { separator = true },
-      { label = "Connection…", command = "connection" },
+      { label = "Connections…", command = "connections" },
+      { label = "New Connection…", command = "new_connection" },
       { label = "Settings…", command = "settings" },
       { label = "Reconnect", command = "reconnect" },
     },
     on_action = on_action,
   },
   commands = {
-    { id = "postgres.connect", title = "Postgres: Connect…", handler = Connection.dialog },
+    { id = "postgres.connections", title = "Postgres: Connections…", handler = Connections.dialog },
+    { id = "postgres.connect", title = "Postgres: New Connection…", handler = Connection.new },
     { id = "postgres.newQuery", title = "Postgres: New Query", handler = new_query },
     { id = "postgres.runQuery", title = "Postgres: Run Query", handler = Query.run_active },
     { id = "postgres.refresh", title = "Postgres: Refresh", handler = refresh },
-    { id = "postgres.reconnect", title = "Postgres: Reconnect", handler = Db.connect },
+    { id = "postgres.reconnect", title = "Postgres: Reconnect", handler = Connection.reconnect },
     { id = "postgres.settings", title = "Postgres: Settings…", handler = Settings.dialog },
   },
 })
