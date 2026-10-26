@@ -13,6 +13,8 @@ S.conn = S.entry and Saved.conn(S.entry) or default_conn()
 S.settings = storage.get("settings") or {}
 S.psql_path = S.settings.psql_path or "psql"
 S.page_size = tonumber(S.settings.page_size) or 50
+S.query_timeout = tonumber(S.settings.query_timeout) or 300
+S.max_rows = tonumber(S.settings.max_rows) or 10000
 
 S.status = "idle"
 S.message = ""
@@ -34,6 +36,12 @@ function S.redraw()
   for _, p in pairs(S.panels) do
     pcall(p.redraw, p)
     return
+  end
+end
+
+function S.query_timeout_ms()
+  if S.query_timeout > 0 then
+    return S.query_timeout * 1000
   end
 end
 

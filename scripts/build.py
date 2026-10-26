@@ -46,23 +46,23 @@ end
 """
 
 
-def module_name(path: pathlib.Path) -> str:
-    parts = list(path.relative_to(SRC).with_suffix("").parts)
+def module_name(path: pathlib.Path, root: pathlib.Path) -> str:
+    parts = list(path.relative_to(root).with_suffix("").parts)
     if parts[-1] == "init" and len(parts) > 1:
         parts.pop()
     return ".".join(parts)
 
 
-def bundle() -> str:
-    files = sorted(SRC.rglob("*.lua"))
+def bundle(roots=(SRC,), entry=ENTRY) -> str:
     names = {}
-    for path in files:
-        name = module_name(path)
-        if name in names:
-            sys.exit(f"build: {path} and {names[name]} both define module {name}")
-        names[name] = path
-    if ENTRY not in names:
-        sys.exit(f"build: missing entry module src/{ENTRY}.lua")
+    for root in roots:
+        for path in sorted(root.rglob("*.lua")):
+            name = module_name(path, root)
+            if name in names:
+                sys.exit(f"build: {path} and {names[name]} both define module {name}")
+            names[name] = path
+    if entry not in names:
+        sys.exit(f"build: missing entry module {entry}")
 
     out = [PRELUDE]
     for name, path in names.items():
@@ -70,7 +70,7 @@ def bundle() -> str:
         rel = path.relative_to(ROOT)
         out.append(f'\n-- {rel} {"-" * max(3, 74 - len(str(rel)))}\n')
         out.append(f'__modules["{name}"] = function()\n{source}\nend\n')
-    out.append(f'\nrequire("{ENTRY}")\n')
+    out.append(f'\nrequire("{entry}")\n')
     return "".join(out)
 
 

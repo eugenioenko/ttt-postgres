@@ -61,8 +61,29 @@ function U.count(n)
   return tostring(math.floor(n))
 end
 
+function U.thousands(n)
+  local s = tostring(math.floor(tonumber(n) or 0))
+  local head = (#s - 1) % 3 + 1
+  local out = s:sub(1, head)
+  for i = head + 1, #s, 3 do
+    out = out .. "," .. s:sub(i, i + 2)
+  end
+  return out
+end
+
 function U.plural(n, one, many)
-  return tostring(n) .. " " .. (n == 1 and one or (many or one .. "s"))
+  return U.thousands(n) .. " " .. (n == 1 and one or (many or one .. "s"))
+end
+
+function U.duration(seconds)
+  if seconds < 10 then
+    return string.format("%.1f s", seconds)
+  elseif seconds < 60 then
+    return string.format("%d s", math.floor(seconds + 0.5))
+  elseif seconds < 3600 then
+    return string.format("%d min", math.floor(seconds / 60 + 0.5))
+  end
+  return string.format("%.1f h", seconds / 3600)
 end
 
 function U.option_label(options, value)

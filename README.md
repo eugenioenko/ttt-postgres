@@ -1,18 +1,69 @@
 # PostgreSQL for ttt
 
-Browse a [PostgreSQL](https://www.postgresql.org) database inside the [ttt](https://github.com/eugenioenko/ttt) terminal editor: switch schemas, page through the rows of a table or view, read its structure, and run SQL.
+Browse a [PostgreSQL](https://www.postgresql.org) database inside the [ttt](https://github.com/eugenioenko/ttt) terminal editor: switch schemas, page through tables and views, read their structure, and run SQL. The plugin talks to the server through `psql`, so it reaches any server `psql` can reach.
 
-The plugin talks to the server through `psql`, the PostgreSQL command line client, so it works with any server `psql` can reach and needs no driver of its own.
+## Requirements
 
-## Features
+- **ttt newer than 1.9.0.** The plugin cancels, times out and streams `psql` through plugin APIs that landed after the 1.9.0 release (`sys.exec_async` handles and streaming, `sys.request_exec`). Until the next release, build ttt from `main`.
+- **`psql`**, the PostgreSQL command line client. Any recent version works.
+  - Debian and Ubuntu: `sudo apt install postgresql-client`.
+  - macOS: `brew install libpq`. Homebrew installs libpq "keg-only", so `psql` is not on your `PATH`. Either run `brew link --force libpq`, or set the psql path in `Postgres: Settings…` to `/opt/homebrew/opt/libpq/bin/psql` (Apple Silicon) or `/usr/local/opt/libpq/bin/psql` (Intel).
 
-The **Postgres** sidebar panel has a schema switcher, a filter, and the tables and views of the current schema. Tables show their estimated row count (from the planner statistics, so it costs nothing), materialized views show `mat`. Activating a table or view opens it in its own editor tab, and opening it again focuses that tab.
+ttt looks `psql` up on the `PATH` of the environment it was started from.
 
-- **Data**: the rows, a page at a time. Paging runs `LIMIT`/`OFFSET` on the server, ordered by the primary key when there is one, and the total comes from `count(*)`. Columns are as wide as their widest value, up to 60 columns of text, and a table with more columns than fit scrolls sideways (Left and Right, or Shift+wheel). Enter on a row shows every column in full, NULLs and line breaks included.
-- **Structure**: kind, estimated rows, size and primary key; the columns with their type, nullability, default (identity and generated columns too) and PK/FK markers; indexes with their definition and size; foreign keys; the foreign keys of other tables that point here; unique, check and exclusion constraints. Views show their definition.
-- **Query**: a SQL editor in its own tab. **Run** or F5 runs everything in it. The result of the last statement that returns rows shows in a table, with the row count, the command tags (`UPDATE 3`, `ROLLBACK`) and the server time. Errors show psql's message as it prints it, with the caret under the failing position, and notices show below the editor.
+## Install
 
-Commands in the palette:
+In ttt, open the command palette (Ctrl+P), run **Plugins: Install from URL** and enter:
+
+```
+https://github.com/eugenioenko/ttt-postgres
+```
+
+Once the plugin is listed in ttt's community registry, you can also install it from the **Plugins** sidebar tab by searching for "postgres".
+
+To install by hand, clone it into ttt's plugins folder and restart ttt:
+
+```sh
+git clone https://github.com/eugenioenko/ttt-postgres.git ~/.config/ttt/plugins/postgres
+```
+
+### Permissions
+
+ttt asks you to approve the plugin's permissions when it first loads:
+
+- `system.exec` for `psql`: the plugin runs `psql` for every query. It may run no other program.
+- `storage`: remembers saved connections, the current schema and the settings.
+- `panel.sidebar`, `panel.editor` and `commands`: the Postgres sidebar panel, the table and query tabs, and the palette commands.
+
+If you point the plugin at a `psql` outside your `PATH` (see [Settings](#settings)), ttt asks once more, showing the full path, when you save it. Allowing it approves that one file, and ttt remembers it across restarts. Other files called `psql` stay blocked.
+
+## Connect
+
+Open the **Postgres** sidebar panel (from the sidebar's » menu) and pick **Set up connection…**, or run `Postgres: New Connection…`. Fill in the host, port, database, user and password, or paste a connection URI such as `postgresql://user@host:5432/db?sslmode=require`, which replaces the fields. The name defaults to `database@host`. The plugin connects before it saves, so a typo shows up as psql's error in the dialog.
+
+The password:
+
+- Is **not saved** unless you tick **Save password**. Without it, ttt keeps it in memory until it exits and asks for it again next time.
+- With **Save password**, it is stored in **plain text** in ttt's plugin storage (`~/.config/ttt/state/plugins/postgres.json`). The dialog warns about this while the box is ticked. Only save it for local, non-sensitive credentials.
+- Can be left empty to let libpq find it: the `PGPASSWORD` variable of the environment ttt was started from, or `~/.pgpass`. A saved connection with an empty password connects without asking.
+
+A password in a URI is taken out of the URI and treated the same way. psql gets the password through its own environment, never on its command line, and reads the SQL from standard input, so neither shows in the process list.
+
+`Postgres: Connections…`, the panel's menu, or a click on the connection at the bottom of the panel lists the saved connections, with **Connect**, **Edit**, **Delete** and **New…**. When ttt starts, the plugin reconnects to the one you used last, unless it has to ask for its password.
+
+## Use
+
+The sidebar shows a schema switcher, a filter, and the tables and views of the schema with their estimated row counts. Activate one to open it in its own tab:
+
+- **Data**: the rows, a page at a time, ordered by the primary key when there is one. Left and Right (or Shift+wheel) scroll wide tables sideways.
+- **Structure**: columns, indexes, foreign keys in both directions, constraints, size, and a view's definition.
+- **Query** opens a query tab on that table.
+
+In a **query tab**, type SQL and press **F5** or **Run**. While it runs, the status line counts the rows received and a **Cancel** button stops it. Cancelling, or closing the tab, stops psql and asks the server to cancel the statement too. Running again while a query runs cancels the first run. The tab shows the result of the last statement that returns rows, with the row count, command tags such as `UPDATE 3`, and the server time. Errors show psql's message with the caret under the failing position.
+
+Enter or a double click on a row shows every column of that row in full. Escape closes it.
+
+### Commands
 
 | Command | What it does |
 |---------|--------------|
@@ -22,59 +73,25 @@ Commands in the palette:
 | `Postgres: Run Query` | Run the query tab you used last |
 | `Postgres: Refresh` | Reload the schema's tables and the open tabs |
 | `Postgres: Reconnect` | Connect again to the current connection |
-| `Postgres: Settings…` | Set the psql binary and the page size |
+| `Postgres: Settings…` | Change the settings below |
 
-The panel's menu has the same entries, and each table tab has a **Query** button that opens a query on that table.
+## Settings
 
-## Requirements
+`Postgres: Settings…`:
 
-`psql`, the PostgreSQL client, on your `PATH`. On Debian and Ubuntu it is in the `postgresql-client` package, on macOS in `libpq` or `postgresql` from Homebrew.
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| psql binary | `psql` | `psql` from your `PATH`, or the absolute path of a file named `psql`, such as `/usr/lib/postgresql/16/bin/psql`. A path asks for your approval once (see [Permissions](#permissions)). |
+| Page size | 50 rows | Rows per page in Data tabs and query results. |
+| Query timeout | 5 minutes | How long a query tab or a Data page may run before psql is stopped and the statement cancelled. "No timeout" turns it off. The plugin's own catalog queries always stop after 30 seconds. |
+| Query results | Keep 10,000 rows | Rows a query tab keeps from a result. The rest are counted, and the tab says "first 10,000 of N rows shown". |
 
-## Install
+## Limitations
 
-Clone the repository and link it into ttt's plugins folder, then restart ttt:
-
-```sh
-git clone https://github.com/eugenioenko/ttt-postgres.git
-ln -s "$PWD/ttt-postgres" ~/.config/ttt/plugins/postgres
-```
-
-ttt asks you to approve the permissions on first start. The plugin uses `system.exec` for `psql`, `storage` (to remember the saved connections, the schema and the settings), `panel.sidebar`, `panel.editor` and `commands`.
-
-## Connecting
-
-Open the **Postgres** sidebar panel and pick **Set up connection…**, or run `Postgres: New Connection…`. Give the connection a name (it defaults to `database@host`), and fill in the host, port, database, user and password, or paste a connection URI (`postgresql://user@host:5432/db?sslmode=require`), which replaces the fields. The plugin connects before it saves, so a typo shows up as psql's error in the dialog.
-
-Connections are saved by name. `Postgres: Connections…`, the panel's menu, or a click on the connection at the bottom of the panel lists them: Enter or **Connect** connects to the selected one, **Edit** opens it in the dialog, **Delete** removes it after you confirm, and **New…** adds another. When ttt starts, the plugin connects to the one you used last, unless it has to ask for its password. A connection saved by an earlier version of the plugin becomes the first saved connection, password included.
-
-The password is not saved unless you tick **Save password**. Without it, the password is kept in memory until ttt exits, and connecting to that connection in a later session opens the dialog with the other fields filled in and asks for it. With it, the password is stored in plain text in ttt's plugin storage (`~/.config/ttt/state/plugins/postgres.json`), so only save it for local, non-sensitive credentials; the dialog says so while the box is ticked. A password in a connection URI is treated the same way: it is taken out of the URI before the URI is saved.
-
-Leave the password empty to let libpq find it the usual way: the `PGPASSWORD` variable of the environment ttt was started from, or `~/.pgpass`. A connection that saves an empty password connects without asking.
-
-psql gets the password through the `PGPASSWORD` variable of its own environment, never on its command line, so other users of the machine cannot see it in the process list.
-
-The SQL never goes on the command line: psql reads it from standard input.
-
-### Another psql
-
-`Postgres: Settings…` sets the psql binary. ttt only runs binaries the manifest lists under `system.exec`, matched exactly, so a full path such as `/usr/lib/postgresql/16/bin/psql` must also be added to `plugin.ttt.json` and the plugin approved again. A wrapper script on your `PATH` named `psql` works without that, for example one that runs psql in Docker:
-
-```sh
-#!/bin/sh
-exec docker run --rm -i --network host -e PGPASSWORD postgres:16 psql "$@"
-```
-
-## How psql's output is read
-
-Every call runs `psql -X -q -w -v ON_ERROR_STOP=1 -A -F <US> -R <RS> -P footer=on -P null=<GS> -d <connection>` with the script on standard input:
-
-- `-X` skips `~/.psqlrc`, so its settings cannot change the output, and `-w` makes psql fail instead of prompting for a password on the terminal ttt is drawing on.
-- `-A` with the ASCII unit separator (0x1F) between fields and the record separator (0x1E) between rows means values with commas, quotes, tabs, pipes or line breaks come through as they are, with nothing to unquote. CSV would also be lossless, but needs a quote-aware parser, and NULL and the empty string look the same in it.
-- NULL prints as the group separator (0x1D), so it differs from an empty string and from the text `NULL`.
-- The footer stays on: a result set always ends with a record separator followed by `(N rows)`, which tells it apart from a command tag such as `UPDATE 3`. That way several statements in one run split cleanly, and the plugin's own catalog queries ask for several result sets in one call.
-- Query tabs turn on `\timing` to report the server time of each statement.
-
-The one thing this cannot carry is a value that itself contains those control characters, which text columns almost never do.
+- A query tab stops reading after 64 MiB of output from psql, even below the row limit, and shows the rows it has with a note. psql is stopped at that point, so later statements in the same run do not run.
+- Quitting ttt or reloading the plugin while a query runs stops psql, but the statement keeps running on the server until it ends.
+- The Data tab's row count is an exact `count(*)`, which can be slow on very large tables.
+- Values that contain the ASCII control characters 0x1D to 0x1F cannot be told apart from psql's separators.
 
 ## Development
 
@@ -83,21 +100,22 @@ ttt loads a plugin from a single Lua file, so the source lives in `src/` as modu
 ```sh
 scripts/build.py           # writes init.lua
 scripts/build.py --check   # fails when init.lua is out of date
+stylua --check src tests
+scripts/test.py            # unit tests
 ```
 
-A module's name is its path: `src/features/table/store.lua` is `require("features.table.store")`, and a folder's `init.lua` is the folder itself, so `src/features/table/init.lua` is `require("features.table")`. `ttt.*` modules resolve as usual. The bundle runs `src/main.lua`.
+A module's name is its path: `src/features/table/store.lua` is `require("features.table.store")`, and a folder's `init.lua` is the folder itself. The bundle runs `src/main.lua`.
 
 ```
 src/main.lua            registration: sidebar, commands
-src/core/               state, psql invocation and parsing, catalog SQL, connection
+src/core/               state, psql invocation, the output parser, catalog SQL, saved connections
 src/components/         forms, dialogs, layout helpers, the result grid
-src/app/                router (one editor tab per page), sidebar, connection, settings
+src/app/                router (one editor tab per page), sidebar, connections, settings
 src/features/table/     table tab: Data and Structure
 src/features/query/     query tab
+tests/unit/             unit tests and their runner
 ```
 
-## Limitations
+**Tests.** `scripts/test.py` bundles `src/` with `tests/unit/` and runs the tests headless through `ttt --plugin`, which provides the Lua runtime, so no Lua interpreter is needed. It uses `ttt` from `PATH`, or `TTT_BIN`. With `PGTEST_URI` (and `PGTEST_PASSWORD`) set, it also runs a smoke test in which the real plugin connects to that database and runs a query. CI runs the bundle check, stylua and the unit tests.
 
-- A running query cannot be cancelled from ttt; set `statement_timeout` in the connection URI's `options` if you need a bound.
-- A query tab keeps the whole result of its last statement in memory and pages it locally.
-- The row count of the Data tab is an exact `count(*)`, which can be slow on very large tables.
+**How psql's output is read.** Every call runs `psql -X -q -w -v ON_ERROR_STOP=1 -A -F <US> -R <RS> -P footer=on -P null=<GS>` with the script on standard input. `-X` skips `~/.psqlrc` and `-w` never prompts for a password. Fields are separated by the ASCII unit separator (0x1F) and rows by the record separator (0x1E), so commas, quotes, tabs and line breaks in values need no unquoting, and NULL prints as the group separator (0x1D), distinct from an empty string. The footer stays on: a result set ends with `<RS>(N rows)`, which tells it apart from a command tag and lets several statements split cleanly. Query tabs also turn on `\timing` and set `FETCH_COUNT`, so psql streams large results instead of holding them in memory. Each script starts by printing the backend's pid and start time, which lets a cancel or a timeout cancel the statement on the server. `src/core/parse.lua` reads the output chunk by chunk as it streams in.

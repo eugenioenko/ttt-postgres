@@ -78,7 +78,7 @@ order by 1, 2;
 end
 
 function M.query(text)
-  return "\\timing on\n\\set QUIET off\n" .. text .. "\n"
+  return "\\timing on\n\\set QUIET off\n\\set FETCH_COUNT 1000\n" .. text .. "\n"
 end
 
 return M

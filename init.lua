@@ -461,6 +461,8 @@ end
 
 -- src/app/settings.lua ------------------------------------------------------
 __modules["app.settings"] = function()
+local ttt = require("ttt")
+local sys = require("ttt.system")
 local storage = require("ttt.storage")
 local U = require("core.util")
 local S = require("core.state")
@@ -475,37 +477,135 @@ M.PAGE_SIZES = {
   { label = "250 rows per page", value = "250" },
 }
 
+M.TIMEOUTS = {
+  { label = "10 seconds", value = "10" },
+  { label = "30 seconds", value = "30" },
+  { label = "1 minute", value = "60" },
+  { label = "5 minutes", value = "300" },
+  { label = "15 minutes", value = "900" },
+  { label = "1 hour", value = "3600" },
+  { label = "No timeout", value = "0" },
+}
+
+M.MAX_ROWS = {
+  { label = "Keep 1,000 rows", value = "1000" },
+  { label = "Keep 10,000 rows", value = "10000" },
+  { label = "Keep 50,000 rows", value = "50000" },
+  { label = "Keep 100,000 rows", value = "100000" },
+}
+
 M.on_change = nil
+
+local function changed()
+  storage.set("settings", S.settings)
+  if M.on_change then
+    M.on_change()
+  end
+end
+
+local function set_path(path)
+  S.psql_path = path
+  S.settings.psql_path = path
+  changed()
+end
+
+local function approved(path, granted)
+  if granted then
+    set_path(path)
+    ttt.notify("Postgres: using " .. path)
+  else
+    ttt.notify("Postgres: " .. path .. " was not approved, still using " .. S.psql_path, "warn")
+  end
+end
+
+local function file_name(path)
+  return path:match("([^/\\]+)$") or ""
+end
+
+local function check_path(path)
+  if path == "psql" then
+    return nil
+  end
+  if not (path:sub(1, 1) == "/" or path:match("^%a:[/\\]")) then
+    return "Use psql or an absolute path to psql"
+  end
+  local name = file_name(path)
+  if name ~= "psql" and name ~= "psql.exe" then
+    return "The plugin can only run a file named psql"
+  end
+end
+
+-- ttt asks the user to approve an absolute path once; the approval dialog
+-- needs the settings dialog closed first.
+local function request(path)
+  if not sys.request_exec then
+    return ttt.notify("Postgres: the plugin needs the system.exec permission for psql", "error")
+  end
+  local ok, err = sys.request_exec(path, U.bind(approved, path))
+  if not ok then
+    ttt.notify("Postgres: can't use " .. path .. ": " .. tostring(err), "error")
+  end
+end
 
 local function save(v, done)
   local path = U.trim(v.psql_path)
   if path == "" then
     path = "psql"
   end
-  S.psql_path = path
-  S.page_size = tonumber(v.page_size) or S.page_size
-  S.settings.psql_path = path
-  S.settings.page_size = S.page_size
-  storage.set("settings", S.settings)
-  if M.on_change then
-    M.on_change()
+  local err = check_path(path)
+  if err then
+    return done(err)
   end
+  S.page_size = tonumber(v.page_size) or S.page_size
+  S.query_timeout = tonumber(v.query_timeout) or S.query_timeout
+  S.max_rows = tonumber(v.max_rows) or S.max_rows
+  S.settings.page_size = S.page_size
+  S.settings.query_timeout = S.query_timeout
+  S.settings.max_rows = S.max_rows
+  if path == "psql" then
+    S.psql_path = path
+    S.settings.psql_path = path
+    changed()
+    return done()
+  end
+  changed()
   done()
+  request(path)
 end
 
 function M.dialog()
   UI.dialog({
     title = "PostgreSQL Settings",
     width = 64,
-    hint = "A path other than psql must also be in system.exec.",
+    hint = "ttt asks you once to approve a psql path.",
     fields = {
-      { key = "psql_path", label = "psql binary", value = S.psql_path, required = true, placeholder = "psql" },
+      {
+        key = "psql_path",
+        label = "psql binary (psql on PATH or an absolute path)",
+        value = S.psql_path,
+        required = true,
+        placeholder = "psql",
+      },
       {
         key = "page_size",
         label = "Page size",
         kind = "enum",
         options = M.PAGE_SIZES,
         value = tostring(S.page_size),
+      },
+      {
+        key = "query_timeout",
+        label = "Query timeout",
+        kind = "enum",
+        options = M.TIMEOUTS,
+        value = tostring(S.query_timeout),
+      },
+      {
+        key = "max_rows",
+        label = "Query results",
+        kind = "enum",
+        options = M.MAX_ROWS,
+        value = tostring(S.max_rows),
       },
     },
     on_submit = save,
@@ -919,6 +1019,7 @@ local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Psql = require("core.psql")
+local Dialog = require("components.dialog")
 
 -- A page of a result set as a table with a pager. The rows on show are
 -- grid.rows; a client grid slices them from grid.all, a server grid asks
@@ -927,6 +1028,8 @@ local M = {}
 
 local MAX_CELL = 200
 local MAX_WIDTH = 60
+local MAX_DIALOG_ROWS = 30
+local DIALOG_WIDTH = 96
 
 function M.new(spec)
   local grid = {
@@ -955,16 +1058,6 @@ function M.cell(v)
   end
   v = v:gsub("\r?\n", " ↵ "):gsub("\t", " ")
   return text.truncate(v, MAX_CELL, "…")
-end
-
-function M.full(v)
-  if v == nil then
-    return ""
-  end
-  if Psql.is_null(v) then
-    return "NULL"
-  end
-  return (v:gsub("\r?\n", " ↵ "))
 end
 
 function M.slice(grid)
@@ -996,17 +1089,66 @@ local function select_row(grid, i)
   grid.sel = i
 end
 
+local function row_values(entries, sp)
+  sp:keyvalue(entries)
+end
+
+local function row_buttons(h)
+  h:button({ label = "Close", style = "muted", on_click = ttt.close_dialog })
+end
+
+local function row_dialog(entries, rows, p)
+  p:scrollview({ height = rows, render = U.bind(row_values, entries) })
+  p:hstack({ height = 1, align = "right", margin_top = 1, render = row_buttons })
+end
+
+local function value_lines(v, width)
+  if v == nil then
+    return { "" }
+  end
+  if Psql.is_null(v) then
+    return { "NULL" }
+  end
+  local out = {}
+  for _, line in ipairs(U.split((v:gsub("\r\n", "\n")), "\n")) do
+    local parts = text.wrap(line, width)
+    if #parts == 0 then
+      parts = { "" }
+    end
+    for _, part in ipairs(parts) do
+      out[#out + 1] = part
+    end
+  end
+  return out
+end
+
+-- Long values wrap and line breaks start new lines, continued under an
+-- empty key.
+local function row_entries(columns, row)
+  local key_width = 0
+  for _, name in ipairs(columns) do
+    key_width = math.max(key_width, text.width(name))
+  end
+  local width = math.max(DIALOG_WIDTH - 10 - key_width, 20)
+  local entries = { muted_keys = true, padding_left = 1 }
+  for c, name in ipairs(columns) do
+    for n, line in ipairs(value_lines(row[c], width)) do
+      entries[#entries + 1] = { key = n == 1 and name or "", value = line }
+    end
+  end
+  return entries
+end
+
 local function show_row(grid, title, i)
   grid.sel = i
   local row = grid.rows[i]
   if not row then
     return
   end
-  local entries = {}
-  for c, name in ipairs(grid.columns) do
-    entries[c] = { key = name, value = M.full(row[c]) }
-  end
-  ttt.show_info(title .. " · row " .. tostring(grid.offset + i), entries)
+  local entries = row_entries(grid.columns, row)
+  local rows = math.min(math.max(#entries, 1), MAX_DIALOG_ROWS)
+  local heading = title .. " · row " .. tostring(grid.offset + i)
+  Dialog.open_dialog(heading, DIALOG_WIDTH, rows + 2, U.bind(row_dialog, entries, rows))
 end
 
 local function change_page(grid, offset)
@@ -1329,12 +1471,184 @@ end
 return Db
 end
 
+-- src/core/parse.lua --------------------------------------------------------
+__modules["core.parse"] = function()
+local U = require("core.util")
+
+-- Reads psql's output (see core.psql) as it streams in. Chunks may split it
+-- anywhere, so whatever follows the last complete record or line is carried
+-- over to the next chunk. Each result set keeps its first max_rows rows and
+-- counts the rest.
+local M = {}
+
+M.US = "\31"
+M.RS = "\30"
+
+local MARKER = "^ttt%-postgres backend (%d+) ([%d%.]+)$"
+local FOOTER = "^%((%d+) rows?%)\n"
+-- Longer than any "(N rows)\n" footer.
+local SHORT = 32
+
+function M.new(max_rows)
+  return {
+    max_rows = max_rows or math.huge,
+    statements = {},
+    cur = nil,
+    set = nil,
+    carry = {},
+    carry_len = 0,
+    received = 0,
+    backend = nil,
+  }
+end
+
+local function current(p)
+  if not p.cur then
+    p.cur = {}
+    p.statements[#p.statements + 1] = p.cur
+  end
+  return p.cur
+end
+
+local function timing(line)
+  local ms = line:match("^[^:]+: ([%d%.,]+) ms")
+  if ms then
+    return tonumber((ms:gsub(",", ".")))
+  end
+end
+
+local function on_line(p, line)
+  if not p.backend then
+    local pid, started = line:match(MARKER)
+    if pid then
+      p.backend = { pid = tonumber(pid), started = started }
+      return
+    end
+  end
+  local ms = timing(line)
+  if ms then
+    current(p).ms = ms
+    p.cur = nil
+  elseif line ~= "" then
+    current(p).tag = line
+  end
+end
+
+local function on_header(p, header)
+  local st = current(p)
+  if st.result then
+    p.cur = nil
+    st = current(p)
+  end
+  st.result = { columns = U.split(header, M.US), rows = {}, total = 0, complete = false }
+  p.set = st.result
+end
+
+local function on_row(p, s, i, j)
+  local set = p.set
+  set.total = set.total + 1
+  p.received = p.received + 1
+  if set.total <= p.max_rows then
+    set.rows[set.total] = U.split(s:sub(i, j), M.US)
+  end
+end
+
+-- The footer is told apart from a row that happens to look like one by its
+-- count, which matches the rows read so far.
+local function footer_end(p, s, pos)
+  if s:byte(pos) ~= 40 then
+    return nil
+  end
+  local _, fe, n = s:sub(pos, pos + SHORT):find(FOOTER)
+  if fe and tonumber(n) == p.set.total then
+    return pos + fe - 1
+  end
+end
+
+local function consume(p, s)
+  local pos, n = 1, #s
+  while pos <= n do
+    if p.set then
+      local fe = footer_end(p, s, pos)
+      if fe then
+        p.set.complete = true
+        p.set = nil
+        pos = fe + 1
+      else
+        local rs = s:find(M.RS, pos, true)
+        if not rs then
+          break
+        end
+        on_row(p, s, pos, rs - 1)
+        pos = rs + 1
+      end
+    else
+      local at = s:find("[\30\n]", pos)
+      if not at then
+        break
+      end
+      if s:byte(at) == 10 then
+        on_line(p, s:sub(pos, at - 1))
+      else
+        on_header(p, s:sub(pos, at - 1))
+      end
+      pos = at + 1
+    end
+  end
+  return s:sub(pos)
+end
+
+local function completes(p, chunk)
+  if p.set then
+    return chunk:find(M.RS, 1, true) or (p.carry_len < SHORT and chunk:find("\n", 1, true))
+  end
+  return chunk:find("[\30\n]")
+end
+
+function M.feed(p, chunk)
+  if chunk == "" then
+    return
+  end
+  if p.carry_len > 0 then
+    local done = completes(p, chunk)
+    p.carry[#p.carry + 1] = chunk
+    p.carry_len = p.carry_len + #chunk
+    if not done then
+      return
+    end
+    chunk = table.concat(p.carry)
+  end
+  local rest = consume(p, chunk)
+  p.carry = { rest }
+  p.carry_len = #rest
+end
+
+-- An unfinished result set keeps complete = false; its last, partial record
+-- is dropped.
+function M.finish(p)
+  local rest = table.concat(p.carry)
+  p.carry, p.carry_len = {}, 0
+  if p.set then
+    if footer_end(p, rest .. "\n", 1) then
+      p.set.complete = true
+    end
+    p.set = nil
+  elseif rest ~= "" then
+    on_line(p, rest)
+  end
+  return p.statements
+end
+
+return M
+end
+
 -- src/core/psql.lua ---------------------------------------------------------
 __modules["core.psql"] = function()
 local sys = require("ttt.system")
 local U = require("core.util")
 local S = require("core.state")
 local Saved = require("core.saved")
+local Parse = require("core.parse")
 
 -- psql runs unaligned with the ASCII unit and record separators between
 -- fields and rows, and a control character for NULL, so values with commas,
@@ -1343,8 +1657,8 @@ local Saved = require("core.saved")
 -- tag such as "UPDATE 3".
 local M = {}
 
-M.US = "\31"
-M.RS = "\30"
+M.US = Parse.US
+M.RS = Parse.RS
 M.NULL = "\29"
 
 local function quote(v)
@@ -1424,93 +1738,130 @@ function M.error_text(res)
   return clean_error(stderr)
 end
 
-local function records(body)
-  local rows = {}
-  for i, record in ipairs(U.split(body, M.RS)) do
-    rows[i] = U.split(record, M.US)
+M.OUTPUT_LIMIT = 64 * 1024 * 1024
+M.OUTPUT_LIMIT_LABEL = "64 MiB"
+M.CATALOG_TIMEOUT_MS = 30000
+
+-- Killing psql leaves its statement running on the server, so a cancel or a
+-- timeout also cancels the backend. Its start time guards against a reused
+-- pid.
+local PRELUDE = "select pg_backend_pid() as ttt_pid, coalesce((select extract(epoch from backend_start)::text"
+  .. " from pg_stat_activity where pid = pg_backend_pid()), '0') as ttt_started \\gset\n"
+  .. "\\echo ttt-postgres backend :ttt_pid :ttt_started\n"
+
+local CANCEL = "select pg_cancel_backend(pid) from pg_stat_activity"
+  .. " where pid = %d and extract(epoch from backend_start)::text = %s;\n"
+
+local function ignore() end
+
+local function cancel_backend(run)
+  local b = run.parser.backend
+  if not b then
+    return
   end
-  return rows
+  local opts = { stdin = string.format(CANCEL, b.pid, U.literal(b.started)), timeout_ms = 10000 }
+  if run.password ~= "" then
+    opts.env = { PGPASSWORD = run.password }
+  end
+  sys.exec_async(run.path, M.args(run.conninfo), opts, ignore)
 end
 
-local function timing(line)
-  local ms = line:match("^[^:]+: ([%d%.,]+) ms")
-  if ms then
-    return tonumber((ms:gsub(",", ".")))
+local function stdout(run, chunk)
+  Parse.feed(run.parser, chunk)
+  if run.on_progress then
+    run.on_progress(run.parser.received)
   end
 end
 
-local function statement(list, cur)
-  if not cur then
-    cur = {}
-    list[#list + 1] = cur
-  end
-  return cur
-end
-
--- Splits psql's output into statements: { result = { columns, rows }, tag, ms }.
-function M.parse(out)
-  local list, cur = {}, nil
-  local pos, n = 1, #out
-  while pos <= n do
-    local nl = out:find("\n", pos, true) or (n + 1)
-    local line = out:sub(pos, nl - 1)
-    local fs = line:find(M.RS, 1, true) and out:find(M.RS .. "%(%d+[^%)\n]*%)\n", pos)
-    if fs then
-      local rows = records(out:sub(pos, fs - 1))
-      local columns = table.remove(rows, 1) or {}
-      cur = statement(list, cur)
-      if cur.result then
-        cur = statement(list, nil)
-      end
-      cur.result = { columns = columns, rows = rows }
-      local _, fe = out:find("%)\n", fs)
-      pos = fe + 1
-    else
-      local ms = timing(line)
-      if ms then
-        statement(list, cur).ms = ms
-        cur = nil
-      elseif line ~= "" then
-        cur = statement(list, cur)
-        cur.tag = line
-      end
-      pos = nl + 1
-    end
-  end
-  return list
-end
-
-local function finished(cb, res)
-  local out = { stdout = res.stdout or "", stderr = res.stderr or "", code = res.exit_code }
-  if res.exit_code ~= 0 then
+local function finished(run, cb, res)
+  local out = {
+    stderr = res.stderr or "",
+    code = res.exit_code,
+    statements = Parse.finish(run.parser),
+    elapsed = os.clock() - run.started,
+  }
+  if res.cancelled then
+    out.stopped = "cancelled"
+  elseif res.timed_out then
+    out.stopped = "timed_out"
+  elseif res.truncated then
+    out.stopped = "truncated"
+  elseif res.exit_code ~= 0 then
     out.err = M.error_text(res)
   end
-  out.statements = M.parse(out.stdout)
+  if out.stopped then
+    cancel_backend(run)
+  end
   cb(out)
 end
 
+local function exec_error(path, err)
+  local msg = tostring(err)
+  if not msg:find("permission denied", 1, true) then
+    return msg
+  end
+  if path ~= "psql" then
+    return path .. " is not approved. Save it in Postgres: Settings… to approve it."
+  end
+  return msg .. ". Approve the plugin's system.exec permission for psql."
+end
+
 -- Runs a script on psql's standard input, so neither the SQL nor its length
--- reaches the command line.
-function M.run(script, cb)
+-- reaches the command line. opts: timeout_ms, max_rows (kept per result set)
+-- and on_progress(rows_received). cb(out) gets { statements, stderr, err,
+-- stopped = "cancelled"|"timed_out"|"truncated", elapsed }. Returns a handle
+-- for M.cancel, or nil when psql could not start.
+function M.run(script, opts, cb)
   if not sys.exec_async then
-    return cb({ err = "The plugin needs the system.exec permission for psql.", statements = {} })
+    cb({ err = "The plugin needs the system.exec permission for psql.", statements = {} })
+    return nil
   end
   local conninfo, password = M.target(S.conn)
-  local opts = { stdin = script }
+  local run = {
+    parser = Parse.new(opts.max_rows),
+    path = S.psql_path,
+    conninfo = conninfo,
+    password = password,
+    on_progress = opts.on_progress,
+    started = os.clock(),
+  }
+  local exec_opts = {
+    stdin = PRELUDE .. script,
+    timeout_ms = opts.timeout_ms,
+    max_output_bytes = M.OUTPUT_LIMIT,
+    on_stdout = U.bind(stdout, run),
+  }
   if password ~= "" then
-    opts.env = { PGPASSWORD = password }
+    exec_opts.env = { PGPASSWORD = password }
   end
-  local _, err = sys.exec_async(S.psql_path, M.args(conninfo), opts, U.bind(finished, cb))
-  if err then
-    local msg = tostring(err)
-    if msg:find("permission denied", 1, true) then
-      msg = msg .. ". Add it to system.exec in plugin.ttt.json and approve the plugin again."
-    end
-    cb({ err = msg, statements = {} })
+  local handle, err = sys.exec_async(run.path, M.args(conninfo), exec_opts, U.bind(finished, run, cb))
+  if not handle then
+    cb({ err = exec_error(run.path, err), statements = {} })
+    return nil
+  end
+  run.handle = handle
+  return run
+end
+
+function M.cancel(run)
+  if run and run.handle then
+    run.handle:cancel()
   end
 end
 
-local function results(cb, out)
+function M.stopped_text(out, timeout_ms)
+  if out.stopped == "timed_out" then
+    return "No result after " .. U.duration(timeout_ms / 1000) .. ", so psql was stopped."
+  elseif out.stopped == "truncated" then
+    return "psql's output passed " .. M.OUTPUT_LIMIT_LABEL .. ", so it was stopped."
+  end
+  return "Cancelled."
+end
+
+local function results(cb, timeout_ms, out)
+  if out.stopped then
+    return cb(M.stopped_text(out, timeout_ms))
+  end
   if out.err then
     return cb(out.err)
   end
@@ -1523,9 +1874,14 @@ local function results(cb, out)
   cb(nil, list)
 end
 
--- For the plugin's own catalog queries: cb(err, result_sets).
-function M.query(sql, cb)
-  M.run(sql, U.bind(results, cb))
+-- For the plugin's own queries: cb(err, result_sets). opts.timeout_ms
+-- replaces the catalog timeout; nil there means none.
+function M.query(sql, cb, opts)
+  local timeout = M.CATALOG_TIMEOUT_MS
+  if opts then
+    timeout = opts.timeout_ms
+  end
+  M.run(sql, { timeout_ms = timeout }, U.bind(results, cb, timeout))
 end
 
 function M.is_null(v)
@@ -1793,7 +2149,7 @@ order by 1, 2;
 end
 
 function M.query(text)
-  return "\\timing on\n\\set QUIET off\n" .. text .. "\n"
+  return "\\timing on\n\\set QUIET off\n\\set FETCH_COUNT 1000\n" .. text .. "\n"
 end
 
 return M
@@ -1816,6 +2172,8 @@ S.conn = S.entry and Saved.conn(S.entry) or default_conn()
 S.settings = storage.get("settings") or {}
 S.psql_path = S.settings.psql_path or "psql"
 S.page_size = tonumber(S.settings.page_size) or 50
+S.query_timeout = tonumber(S.settings.query_timeout) or 300
+S.max_rows = tonumber(S.settings.max_rows) or 10000
 
 S.status = "idle"
 S.message = ""
@@ -1837,6 +2195,12 @@ function S.redraw()
   for _, p in pairs(S.panels) do
     pcall(p.redraw, p)
     return
+  end
+end
+
+function S.query_timeout_ms()
+  if S.query_timeout > 0 then
+    return S.query_timeout * 1000
   end
 end
 
@@ -1912,8 +2276,29 @@ function U.count(n)
   return tostring(math.floor(n))
 end
 
+function U.thousands(n)
+  local s = tostring(math.floor(tonumber(n) or 0))
+  local head = (#s - 1) % 3 + 1
+  local out = s:sub(1, head)
+  for i = head + 1, #s, 3 do
+    out = out .. "," .. s:sub(i, i + 2)
+  end
+  return out
+end
+
 function U.plural(n, one, many)
-  return tostring(n) .. " " .. (n == 1 and one or (many or one .. "s"))
+  return U.thousands(n) .. " " .. (n == 1 and one or (many or one .. "s"))
+end
+
+function U.duration(seconds)
+  if seconds < 10 then
+    return string.format("%.1f s", seconds)
+  elseif seconds < 60 then
+    return string.format("%d s", math.floor(seconds + 0.5))
+  elseif seconds < 3600 then
+    return string.format("%d min", math.floor(seconds / 60 + 0.5))
+  end
+  return string.format("%.1f h", seconds / 3600)
 end
 
 function U.option_label(options, value)
@@ -1991,31 +2376,47 @@ end
 
 local function status_text(q)
   if q.running then
-    return "Running…", "muted"
+    local text = "Running…"
+    if q.received > 0 then
+      text = text .. " " .. U.plural(q.received, "row") .. " so far"
+    end
+    return text, "muted"
+  end
+  if q.stopped == "cancelled" then
+    return "■ Cancelled · " .. q.summary, "warning"
+  end
+  if q.stopped == "timed_out" then
+    return "✕ Timed out · " .. q.summary, "danger"
   end
   if q.err and q.ran then
     return "✕ Failed · " .. q.summary, "danger"
   end
   if q.ran then
-    return "✓ " .. q.summary, "success"
+    return "✓ " .. q.summary, q.shown and "warning" or "success"
   end
   return "F5 runs the SQL above. Enter on a result row shows it in full.", "muted"
 end
 
 local function toolbar(q, h)
-  h:button({ label = "Run", disabled = q.running, on_click = U.bind(Store.run, q) })
+  h:button({ label = "Run", on_click = U.bind(Store.run, q) })
+  if q.running then
+    h:button({ label = "Cancel", style = "muted", on_click = U.bind(Store.cancel, q) })
+  end
   local text, style = status_text(q)
   h:label({ text = text, style = style })
 end
 
 local function results(q, p)
   if q.err then
-    UI.error_box(p, "Error", q.err)
+    UI.error_box(p, q.stopped == "timed_out" and "Timed out" or "Error", q.err)
   end
   if q.notices then
     UI.error_box(p, "Notices", q.notices)
   end
   if q.result and #q.result.columns > 0 then
+    if q.shown then
+      p:label({ text = q.shown, style = "warning", padding_left = 1, margin_top = 1 })
+    end
     UI.grid.render(p, q.grid, { title = q.title, empty = "The query returned no rows" })
   end
 end
@@ -2046,6 +2447,7 @@ local function on_event(q, ev)
 end
 
 local function forget(q)
+  Store.abandon(q)
   if S.active_query == q then
     S.active_query = nil
   end
@@ -2075,6 +2477,8 @@ local M = {}
 
 M.count = 0
 
+local REDRAW_EVERY = 0.1
+
 function M.new(sql)
   M.count = M.count + 1
   return {
@@ -2082,17 +2486,56 @@ function M.new(sql)
     title = "Query " .. M.count,
     sql = sql or "",
     running = false,
+    run = nil,
+    received = 0,
+    drawn_at = 0,
     ran = false,
     err = nil,
+    stopped = nil,
     notices = nil,
     summary = "",
+    shown = nil,
     result = nil,
     gen = 0,
     grid = UI.grid.new(),
   }
 end
 
-local function summarize(q, statements)
+local function rows_part(result, stopped)
+  local kept, total = #result.rows, result.total
+  if result.complete then
+    if total > kept then
+      return "first " .. U.thousands(kept) .. " of " .. U.plural(total, "row") .. " shown"
+    end
+    return U.plural(total, "row")
+  end
+  if total > kept or stopped == "truncated" then
+    return "first " .. U.plural(kept, "row") .. " shown"
+  end
+  return U.plural(kept, "row") .. " received"
+end
+
+-- Why the grid holds fewer rows than the query returned, if it does.
+local function shown_note(result, stopped)
+  local kept = #result.rows
+  if stopped == "truncated" then
+    return "First "
+      .. U.plural(kept, "row")
+      .. " shown: psql's output passed "
+      .. Psql.OUTPUT_LIMIT_LABEL
+      .. ", so it was stopped."
+  elseif stopped == "cancelled" or stopped == "timed_out" then
+    return U.plural(kept, "row") .. " arrived before the query was stopped."
+  elseif result.total > kept then
+    return "First "
+      .. U.thousands(kept)
+      .. " of "
+      .. U.plural(result.total, "row")
+      .. " shown. The limit is in Postgres: Settings…"
+  end
+end
+
+local function summarize(statements, stopped, elapsed)
   local ms, tags, result, count = 0, {}, nil, 0
   for _, st in ipairs(statements) do
     count = count + 1
@@ -2109,47 +2552,84 @@ local function summarize(q, statements)
     parts[#parts + 1] = U.plural(count, "statement")
   end
   if result then
-    parts[#parts + 1] = U.plural(#result.rows, "row")
+    parts[#parts + 1] = rows_part(result, stopped)
   end
   for _, tag in ipairs(tags) do
     parts[#parts + 1] = tag
   end
-  parts[#parts + 1] = string.format("%.1f ms", ms)
+  if stopped then
+    parts[#parts + 1] = U.duration(elapsed)
+  else
+    parts[#parts + 1] = string.format("%.1f ms", ms)
+  end
   return table.concat(parts, " · "), result
 end
 
-local function finished(q, gen, out)
+local function finished(q, gen, timeout, out)
   if gen ~= q.gen then
     return
   end
+  q.run = nil
   q.running = false
   q.ran = true
+  q.stopped = out.stopped
   q.err = out.err
+  if out.stopped == "timed_out" then
+    q.err = "The query ran longer than the "
+      .. U.duration(timeout)
+      .. " timeout, so psql was stopped. The timeout is in Postgres: Settings…"
+  end
   q.notices = nil
-  if not out.err and U.trim(out.stderr) ~= "" then
+  if not out.err and not out.stopped and U.trim(out.stderr) ~= "" then
     q.notices = U.trim(out.stderr)
   end
-  local summary, result = summarize(q, out.statements or {})
+  local summary, result = summarize(out.statements or {}, out.stopped, out.elapsed or 0)
   q.summary = summary
   q.result = result
+  q.shown = result and shown_note(result, out.stopped)
   UI.grid.set_result(q.grid, result)
   S.redraw()
 end
 
-function M.run(q)
-  if q.running then
+local function progress(q, gen, received)
+  if gen ~= q.gen then
     return
   end
+  q.received = received
+  local now = os.clock()
+  if now - q.drawn_at >= REDRAW_EVERY then
+    q.drawn_at = now
+    S.redraw()
+  end
+end
+
+-- Stops the running query; its callback reports it as cancelled.
+function M.cancel(q)
+  Psql.cancel(q.run)
+end
+
+-- Closing the tab drops the query without reporting it.
+function M.abandon(q)
+  q.gen = q.gen + 1
+  Psql.cancel(q.run)
+  q.run = nil
+  q.running = false
+end
+
+-- Running again while a query runs cancels it first.
+function M.run(q)
   if U.trim(q.sql) == "" then
     q.err = "Type a query first."
     S.redraw()
     return
   end
-  q.gen = q.gen + 1
+  M.abandon(q)
   q.running = true
   q.err = nil
+  q.received = 0
+  local opts = { timeout_ms = S.query_timeout_ms(), max_rows = S.max_rows, on_progress = U.bind(progress, q, q.gen) }
+  q.run = Psql.run(SQL.query(q.sql), opts, U.bind(finished, q, q.gen, S.query_timeout))
   S.redraw()
-  Psql.run(SQL.query(q.sql), U.bind(finished, q, q.gen))
 end
 
 return M
@@ -2287,7 +2767,11 @@ function M.load_data(rel, offset)
   grid.gen = grid.gen + 1
   grid.loading = true
   S.redraw()
-  Psql.query(SQL.page(rel.schema, rel.name, S.page_size, grid.offset), U.bind(data_loaded, rel, grid.gen))
+  Psql.query(
+    SQL.page(rel.schema, rel.name, S.page_size, grid.offset),
+    U.bind(data_loaded, rel, grid.gen),
+    { timeout_ms = S.query_timeout_ms() }
+  )
 end
 
 local function rows_of(set)

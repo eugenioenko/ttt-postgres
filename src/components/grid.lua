@@ -3,6 +3,7 @@ local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Psql = require("core.psql")
+local Dialog = require("components.dialog")
 
 -- A page of a result set as a table with a pager. The rows on show are
 -- grid.rows; a client grid slices them from grid.all, a server grid asks
@@ -11,6 +12,8 @@ local M = {}
 
 local MAX_CELL = 200
 local MAX_WIDTH = 60
+local MAX_DIALOG_ROWS = 30
+local DIALOG_WIDTH = 96
 
 function M.new(spec)
   local grid = {
@@ -39,16 +42,6 @@ function M.cell(v)
   end
   v = v:gsub("\r?\n", " ↵ "):gsub("\t", " ")
   return text.truncate(v, MAX_CELL, "…")
-end
-
-function M.full(v)
-  if v == nil then
-    return ""
-  end
-  if Psql.is_null(v) then
-    return "NULL"
-  end
-  return (v:gsub("\r?\n", " ↵ "))
 end
 
 function M.slice(grid)
@@ -80,17 +73,66 @@ local function select_row(grid, i)
   grid.sel = i
 end
 
+local function row_values(entries, sp)
+  sp:keyvalue(entries)
+end
+
+local function row_buttons(h)
+  h:button({ label = "Close", style = "muted", on_click = ttt.close_dialog })
+end
+
+local function row_dialog(entries, rows, p)
+  p:scrollview({ height = rows, render = U.bind(row_values, entries) })
+  p:hstack({ height = 1, align = "right", margin_top = 1, render = row_buttons })
+end
+
+local function value_lines(v, width)
+  if v == nil then
+    return { "" }
+  end
+  if Psql.is_null(v) then
+    return { "NULL" }
+  end
+  local out = {}
+  for _, line in ipairs(U.split((v:gsub("\r\n", "\n")), "\n")) do
+    local parts = text.wrap(line, width)
+    if #parts == 0 then
+      parts = { "" }
+    end
+    for _, part in ipairs(parts) do
+      out[#out + 1] = part
+    end
+  end
+  return out
+end
+
+-- Long values wrap and line breaks start new lines, continued under an
+-- empty key.
+local function row_entries(columns, row)
+  local key_width = 0
+  for _, name in ipairs(columns) do
+    key_width = math.max(key_width, text.width(name))
+  end
+  local width = math.max(DIALOG_WIDTH - 10 - key_width, 20)
+  local entries = { muted_keys = true, padding_left = 1 }
+  for c, name in ipairs(columns) do
+    for n, line in ipairs(value_lines(row[c], width)) do
+      entries[#entries + 1] = { key = n == 1 and name or "", value = line }
+    end
+  end
+  return entries
+end
+
 local function show_row(grid, title, i)
   grid.sel = i
   local row = grid.rows[i]
   if not row then
     return
   end
-  local entries = {}
-  for c, name in ipairs(grid.columns) do
-    entries[c] = { key = name, value = M.full(row[c]) }
-  end
-  ttt.show_info(title .. " · row " .. tostring(grid.offset + i), entries)
+  local entries = row_entries(grid.columns, row)
+  local rows = math.min(math.max(#entries, 1), MAX_DIALOG_ROWS)
+  local heading = title .. " · row " .. tostring(grid.offset + i)
+  Dialog.open_dialog(heading, DIALOG_WIDTH, rows + 2, U.bind(row_dialog, entries, rows))
 end
 
 local function change_page(grid, offset)

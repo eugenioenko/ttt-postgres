@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install ttt
+        run: go install github.com/eugenioenko/ttt/cmd/ttt@main
+      - uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: latest
+          args: --check src tests
+      - name: Bundle is current
+        run: python3 scripts/build.py --check
+      - name: Unit tests
+        run: python3 scripts/test.py

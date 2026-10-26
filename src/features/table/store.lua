@@ -40,7 +40,11 @@ function M.load_data(rel, offset)
   grid.gen = grid.gen + 1
   grid.loading = true
   S.redraw()
-  Psql.query(SQL.page(rel.schema, rel.name, S.page_size, grid.offset), U.bind(data_loaded, rel, grid.gen))
+  Psql.query(
+    SQL.page(rel.schema, rel.name, S.page_size, grid.offset),
+    U.bind(data_loaded, rel, grid.gen),
+    { timeout_ms = S.query_timeout_ms() }
+  )
 end
 
 local function rows_of(set)

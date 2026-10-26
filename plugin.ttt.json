@@ -2,7 +2,7 @@
   "name": "postgres",
   "displayName": "PostgreSQL",
   "description": "Browse PostgreSQL schemas, tables and views, page through rows, inspect structure and run queries through psql",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "eugenioenko",
   "entry": "init.lua",
   "api": 1,

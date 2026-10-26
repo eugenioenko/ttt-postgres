@@ -11,31 +11,47 @@ end
 
 local function status_text(q)
   if q.running then
-    return "Running…", "muted"
+    local text = "Running…"
+    if q.received > 0 then
+      text = text .. " " .. U.plural(q.received, "row") .. " so far"
+    end
+    return text, "muted"
+  end
+  if q.stopped == "cancelled" then
+    return "■ Cancelled · " .. q.summary, "warning"
+  end
+  if q.stopped == "timed_out" then
+    return "✕ Timed out · " .. q.summary, "danger"
   end
   if q.err and q.ran then
     return "✕ Failed · " .. q.summary, "danger"
   end
   if q.ran then
-    return "✓ " .. q.summary, "success"
+    return "✓ " .. q.summary, q.shown and "warning" or "success"
   end
   return "F5 runs the SQL above. Enter on a result row shows it in full.", "muted"
 end
 
 local function toolbar(q, h)
-  h:button({ label = "Run", disabled = q.running, on_click = U.bind(Store.run, q) })
+  h:button({ label = "Run", on_click = U.bind(Store.run, q) })
+  if q.running then
+    h:button({ label = "Cancel", style = "muted", on_click = U.bind(Store.cancel, q) })
+  end
   local text, style = status_text(q)
   h:label({ text = text, style = style })
 end
 
 local function results(q, p)
   if q.err then
-    UI.error_box(p, "Error", q.err)
+    UI.error_box(p, q.stopped == "timed_out" and "Timed out" or "Error", q.err)
   end
   if q.notices then
     UI.error_box(p, "Notices", q.notices)
   end
   if q.result and #q.result.columns > 0 then
+    if q.shown then
+      p:label({ text = q.shown, style = "warning", padding_left = 1, margin_top = 1 })
+    end
     UI.grid.render(p, q.grid, { title = q.title, empty = "The query returned no rows" })
   end
 end
@@ -66,6 +82,7 @@ local function on_event(q, ev)
 end
 
 local function forget(q)
+  Store.abandon(q)
   if S.active_query == q then
     S.active_query = nil
   end
