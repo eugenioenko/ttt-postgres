@@ -1,7 +1,7 @@
 local ttt = require("ttt")
 local fs = require("ttt.fs")
 
-local SUITES = { "util_test", "parse_test", "saved_test", "psql_test" }
+local SUITES = { "util_test", "parse_test", "saved_test", "psql_test", "grid_test" }
 
 local function same(a, b)
   if type(a) ~= "table" or type(b) ~= "table" then
