@@ -53,6 +53,58 @@ def unit(tmp: pathlib.Path) -> bool:
     return run.returncode == 0 and " 0 failed" in text
 
 
+def row_tabs(tmp: pathlib.Path) -> bool:
+    bundle = tmp / "rows.lua"
+    bundle.write_text(build.bundle((build.SRC, ROOT / "tests" / "fixtures"), "rows"), encoding="utf-8")
+    actions = []
+    states = []
+
+    def capture(name: str, commands: list[str]) -> None:
+        actions.extend(commands)
+        path = tmp / (name + ".json")
+        actions.append(f"debug {path}")
+        actions.append(f"screenshot {path.with_suffix('.txt')}")
+        states.append(path)
+
+    capture("enter", ['exec "Rows: Table"', "click 60 9", "key enter"])
+    capture("view", ['exec "Rows: Table"', "click 155 9"])
+    capture("second-row", ['exec "Rows: Table"', "click 60 10", "key enter"])
+    capture("close", ['exec "View: Close Tab"'])
+    capture("reopen", ['exec "Rows: Table"', "click 155 10"])
+    capture("refresh", ['exec "Rows: Replace"', 'exec "Rows: Table"', "click 60 9", "key enter"])
+    capture("snapshot", ['exec "View: Previous Tab"', 'exec "View: Previous Tab"'])
+    capture("query", ['exec "Rows: Query"', "click 60 19", "key enter"])
+    actions.append("quit")
+    run = ttt(tmp / "rows-config", bundle, "; ".join(actions), tmp)
+    try:
+        opened, viewed, second, closed, reopened, refreshed, snapshot, query = [
+            dict(json.loads(path.read_text()), screen=path.with_suffix(".txt").read_text()) for path in states
+        ]
+
+        def active(state):
+            return state["tabs"][state["active_tab"]]["path"]
+
+        for state in (opened, viewed, second, reopened, refreshed, snapshot, query):
+            assert state["focus"] == "editor", "row details should focus the editor"
+            assert not state["overlay"], "row details should not open a dialog"
+        assert len(opened["tabs"]) == 3 and "Alice" in opened["screen"]
+        assert len(viewed["tabs"]) == 3 and active(viewed) == active(opened)
+        assert len(second["tabs"]) == 4 and "Bob" in second["screen"]
+        assert len(closed["tabs"]) == 3
+        assert len(reopened["tabs"]) == 4 and "Bob" in reopened["screen"]
+        assert len(refreshed["tabs"]) == 5 and "Carol" in refreshed["screen"]
+        assert active(snapshot) == active(opened) and "Alice" in snapshot["screen"]
+        assert "Query 1 · row 1" in query["screen"] and "END OF LONG VALUE" in query["screen"]
+        assert "…" not in query["screen"], "row values should not be truncated"
+        assert run.returncode == 0
+    except (OSError, ValueError, AssertionError, KeyError) as err:
+        print("FAIL row tabs: " + str(err))
+        print(run.stdout + run.stderr)
+        return False
+    print("ok   row tabs: Enter, View, focus, reuse, close, refresh and query values")
+    return True
+
+
 def smoke(tmp: pathlib.Path, uri: str) -> bool:
     cfg = tmp / "smoke-config"
     state = cfg / "state" / "plugins"
@@ -93,6 +145,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ttt-postgres-test-") as name:
         tmp = pathlib.Path(name)
         ok = unit(tmp)
+        ok = row_tabs(tmp) and ok
         uri = os.environ.get("PGTEST_URI")
         if uri:
             ok = smoke(tmp, uri) and ok

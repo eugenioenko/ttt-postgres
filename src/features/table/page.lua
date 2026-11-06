@@ -21,7 +21,7 @@ local function data_tab(p, rel)
     return
   end
   UI.grid.render(p, grid, { title = rel.key, empty = "No rows in " .. rel.name })
-  UI.status(p, "Enter shows the whole row.")
+  UI.status(p, "Enter opens the whole row in its own tab.")
 end
 
 local function refresh(page, rel)
