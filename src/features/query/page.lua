@@ -29,7 +29,7 @@ local function status_text(q)
   if q.ran then
     return "✓ " .. q.summary, q.shown and "warning" or "success"
   end
-  return "F5 runs the SQL above. Enter on a result row shows it in full.", "muted"
+  return "F5 runs the SQL above. Enter on a result row opens it in its own tab.", "muted"
 end
 
 local function toolbar(q, h)

@@ -1014,12 +1014,10 @@ end
 
 -- src/components/grid.lua ---------------------------------------------------
 __modules["components.grid"] = function()
-local ttt = require("ttt")
 local text = require("ttt.text")
 local U = require("core.util")
 local S = require("core.state")
 local Psql = require("core.psql")
-local Dialog = require("components.dialog")
 
 -- A page of a result set as a table with a pager. The rows on show are
 -- grid.rows; a client grid slices them from grid.all, a server grid asks
@@ -1028,8 +1026,6 @@ local M = {}
 
 local MAX_CELL = 200
 local MAX_WIDTH = 60
-local MAX_DIALOG_ROWS = 30
-local DIALOG_WIDTH = 96
 
 local ACTIONS = { label = "", actions = { { label = "View", command = "view" } } }
 
@@ -1091,66 +1087,9 @@ local function select_row(grid, i)
   grid.sel = i
 end
 
-local function row_values(entries, sp)
-  sp:keyvalue(entries)
-end
-
-local function row_buttons(h)
-  h:button({ label = "Close", style = "muted", on_click = ttt.close_dialog })
-end
-
-local function row_dialog(entries, rows, p)
-  p:scrollview({ height = rows, render = U.bind(row_values, entries) })
-  p:hstack({ height = 1, align = "right", margin_top = 1, render = row_buttons })
-end
-
-local function value_lines(v, width)
-  if v == nil then
-    return { "" }
-  end
-  if Psql.is_null(v) then
-    return { "NULL" }
-  end
-  local out = {}
-  for _, line in ipairs(U.split((v:gsub("\r\n", "\n")), "\n")) do
-    local parts = text.wrap(line, width)
-    if #parts == 0 then
-      parts = { "" }
-    end
-    for _, part in ipairs(parts) do
-      out[#out + 1] = part
-    end
-  end
-  return out
-end
-
--- Long values wrap and line breaks start new lines, continued under an
--- empty key.
-local function row_entries(columns, row)
-  local key_width = 0
-  for _, name in ipairs(columns) do
-    key_width = math.max(key_width, text.width(name))
-  end
-  local width = math.max(DIALOG_WIDTH - 10 - key_width, 20)
-  local entries = { muted_keys = true, padding_left = 1 }
-  for c, name in ipairs(columns) do
-    for n, line in ipairs(value_lines(row[c], width)) do
-      entries[#entries + 1] = { key = n == 1 and name or "", value = line }
-    end
-  end
-  return entries
-end
-
 local function show_row(grid, title, i)
   grid.sel = i
-  local row = grid.rows[i]
-  if not row then
-    return
-  end
-  local entries = row_entries(grid.columns, row)
-  local rows = math.min(math.max(#entries, 1), MAX_DIALOG_ROWS)
-  local heading = title .. " · row " .. tostring(grid.offset + i)
-  Dialog.open_dialog(heading, DIALOG_WIDTH, rows + 2, U.bind(row_dialog, entries, rows))
+  require("features.row").show(grid, title, i)
 end
 
 local function row_command(grid, title, cmd, i)
@@ -2406,7 +2345,7 @@ local function status_text(q)
   if q.ran then
     return "✓ " .. q.summary, q.shown and "warning" or "success"
   end
-  return "F5 runs the SQL above. Enter on a result row shows it in full.", "muted"
+  return "F5 runs the SQL above. Enter on a result row opens it in its own tab.", "muted"
 end
 
 local function toolbar(q, h)
@@ -2647,6 +2586,79 @@ end
 return M
 end
 
+-- src/features/row.lua ------------------------------------------------------
+__modules["features.row"] = function()
+local text = require("ttt.text")
+local U = require("core.util")
+local S = require("core.state")
+local Psql = require("core.psql")
+local Router = require("app.router")
+
+local M = {}
+local ids = setmetatable({}, { __mode = "k" })
+local count = 0
+
+local function value_lines(value, width)
+  local out = {}
+  for _, line in ipairs(U.split((value:gsub("\r\n", "\n")), "\n")) do
+    local parts = text.wrap(line, width)
+    if #parts == 0 then
+      parts = { "" }
+    end
+    for _, part in ipairs(parts) do
+      out[#out + 1] = part
+    end
+  end
+  return out
+end
+
+local function row_values(entries, width, p)
+  local key_width = 0
+  for _, entry in ipairs(entries) do
+    key_width = math.max(key_width, text.width(entry.key))
+  end
+  local content_width = math.max(width - 2, 1)
+  local key_col = math.min(key_width + 2, math.floor(content_width / 2))
+  local value_width = math.max(content_width - key_col - 2, 1)
+  local wrapped = { muted_keys = true, padding_left = 1, padding_right = 1 }
+  for _, entry in ipairs(entries) do
+    for n, line in ipairs(value_lines(entry.value, value_width)) do
+      wrapped[#wrapped + 1] = { key = n == 1 and entry.key or "", value = line }
+    end
+  end
+  p:keyvalue(wrapped)
+end
+
+local function render(entries, p)
+  S.active_query = nil
+  p:scrollview({ render = U.bind(row_values, entries, p:size() - 1) })
+end
+
+local function page(title, columns, row)
+  local entries = {}
+  for c, name in ipairs(columns) do
+    local value = row[c]
+    entries[c] = { key = name, value = Psql.is_null(value) and "NULL" or value or "" }
+  end
+  return { title = title, render = U.bind(render, entries) }
+end
+
+function M.show(grid, title, i)
+  local row = grid.rows[i]
+  if not row then
+    return
+  end
+  if not ids[row] then
+    count = count + 1
+    ids[row] = "row:" .. count
+  end
+  local heading = title .. " · row " .. tostring(grid.offset + i)
+  return Router.show(ids[row], U.bind(page, heading, grid.columns, row), true)
+end
+
+return M
+end
+
 -- src/features/table/init.lua -----------------------------------------------
 __modules["features.table"] = function()
 local U = require("core.util")
@@ -2693,7 +2705,7 @@ local function data_tab(p, rel)
     return
   end
   UI.grid.render(p, grid, { title = rel.key, empty = "No rows in " .. rel.name })
-  UI.status(p, "Enter shows the whole row.")
+  UI.status(p, "Enter opens the whole row in its own tab.")
 end
 
 local function refresh(page, rel)
